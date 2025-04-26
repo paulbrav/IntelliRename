@@ -1,0 +1,27 @@
+{
+    "python.linting.enabled": true,
+    "python.linting.mypyEnabled": true,
+    "python.linting.mypyArgs": [
+        "--config-file",
+        "${workspaceFolder}/pyproject.toml"
+    ],
+    "python.linting.pylintEnabled": false,
+    "python.analysis.typeCheckingMode": "basic",
+    "editor.formatOnSave": true,
+    "python.formatting.provider": "black",
+    "python.formatting.blackArgs": [
+        "--config",
+        "${workspaceFolder}/pyproject.toml"
+    ],
+    "[python]": {
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit"
+        }
+    },
+    "python.sortImports.args": [
+        "--profile",
+        "black",
+        "--settings-path",
+        "${workspaceFolder}/pyproject.toml"
+    ]
+} 

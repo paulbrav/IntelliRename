@@ -1,9 +1,9 @@
 #!/bin/bash
-# Install script for Book & Paper Renamer
+# Install script for IntelliRename
 
 set -e  # Exit on error
 
-echo "Installing Book & Paper Renamer..."
+echo "Installing IntelliRename..."
 
 # Check for Python
 if ! command -v python3 &> /dev/null; then
@@ -26,7 +26,7 @@ echo "Installing dependencies..."
 pip install -r requirements.txt
 
 # Install the package
-echo "Installing Book & Paper Renamer..."
+echo "Installing IntelliRename..."
 pip install -e .
 
 # Create .env file if it doesn't exist
@@ -40,6 +40,6 @@ echo "Installation complete!"
 echo "To use the tool:"
 echo "1. Edit the .env file and add your Perplexity API key"
 echo "2. Activate the virtual environment: source venv/bin/activate"
-echo "3. Run the tool: book-renamer /path/to/your/books"
+echo "3. Run the tool: intellirename /path/to/your/books"
 echo ""
-echo "For more options, run: book-renamer --help" 
+echo "For more options, run: intellirename --help" 

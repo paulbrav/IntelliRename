@@ -1,0 +1,77 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Book Renamer: AI Dry Run",
+            "type": "python",
+            "request": "launch",
+            "module": "pdf_renamer.main",
+            "args": [
+                "${input:directoryPath}",
+                "--dry-run",
+                "--enable-ai",
+                "--confidence-threshold",
+                "0.3",
+                "--verbose"
+            ],
+            "justMyCode": true,
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Book Renamer: Single File AI Dry Run",
+            "type": "python",
+            "request": "launch",
+            "module": "pdf_renamer.main",
+            "args": [
+                "${input:filePath}",
+                "--dry-run",
+                "--enable-ai",
+                "--confidence-threshold",
+                "0.3",
+                "--verbose"
+            ],
+            "justMyCode": true,
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Book Renamer: Recursive AI Dry Run",
+            "type": "python",
+            "request": "launch",
+            "module": "pdf_renamer.main",
+            "args": [
+                "${input:directoryPath}",
+                "--dry-run",
+                "--enable-ai",
+                "--confidence-threshold",
+                "0.3",
+                "--verbose",
+                "--recursive"
+            ],
+            "justMyCode": true,
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        }
+    ],
+    "inputs": [
+        {
+            "id": "directoryPath",
+            "type": "promptString",
+            "description": "Directory containing book files",
+            "default": "."
+        },
+        {
+            "id": "filePath",
+            "type": "promptString",
+            "description": "Path to a single book file",
+            "default": "path/to/book.pdf"
+        }
+    ]
+} 

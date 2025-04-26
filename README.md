@@ -1,4 +1,4 @@
-# Book & Paper Renamer
+# IntelliRename
 
 A Python tool to intelligently rename PDF and EPUB book and academic paper files with accurate metadata.
 
@@ -12,13 +12,35 @@ A Python tool to intelligently rename PDF and EPUB book and academic paper files
 - **Flexible Configuration**: Control confidence thresholds and processing options
 - **Caching**: Stores API results to minimize redundant web searches
 
+## Configuration
+
+All non-secret configuration options (such as confidence threshold, retries, temperature, max tokens, and cache settings) are now managed in `pdf_renamer/config.py`. You can edit this file to adjust the tool's behavior.
+
+Only the Perplexity API key is set via environment variable. You can set it in your shell or in a `.env` file in the project root:
+
+```bash
+export PERPLEXITY_API_KEY=your_api_key_here
+```
+
+Or create a `.env` file with:
+
+```
+PERPLEXITY_API_KEY=your_api_key_here
+```
+
+The tool will automatically load this key at runtime.
+
+## Caching
+
+Caching options (such as `USE_CACHE` and `DEFAULT_CACHE_DIR`) are now set in `pdf_renamer/config.py`. Edit this file to enable/disable caching or change the cache directory.
+
 ## Installation
 
 ### Quick Install
 
 ```bash
-git clone https://github.com/yourusername/book-renamer.git
-cd book-renamer
+git clone https://github.com/yourusername/intellirename.git
+cd intellirename
 ./install.sh
 ```
 
@@ -32,8 +54,8 @@ The install script will:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/book-renamer.git
-cd book-renamer
+git clone https://github.com/yourusername/intellirename.git
+cd intellirename
 
 # Create and activate a virtual environment
 python3 -m venv venv
@@ -65,13 +87,13 @@ PERPLEXITY_API_KEY=your_api_key_here
 Basic usage:
 
 ```bash
-book-renamer /path/to/your/books
+intellirename /path/to/your/books
 ```
 
 Advanced options:
 
 ```bash
-book-renamer /path/to/your/books --recursive --enable-ai --confidence-threshold 0.6 --verbose
+intellirename /path/to/your/books --recursive --enable-ai --confidence-threshold 0.6 --verbose
 ```
 
 ### Command Line Arguments
@@ -106,7 +128,7 @@ The tool caches API results to minimize redundant API calls. You can configure c
 
 ```
 USE_CACHE=true
-CACHE_DIR=~/.book_renamer/cache
+CACHE_DIR=~/.intellirename/cache
 ```
 
 ## Examples
@@ -119,7 +141,7 @@ Fix garbled metadata:
 
 Process a directory with all options:
 ```bash
-book-renamer ~/Documents/Books --recursive --enable-ai --verbose
+intellirename ~/Documents/Books --recursive --enable-ai --verbose
 ```
 
 ## License

@@ -4,13 +4,15 @@ Tests for the AI metadata enhancement functionality.
 These tests verify that the AI metadata enhancement functions work correctly.
 """
 
-# import os
+import os
 import unittest
+from typing import Dict
+from unittest.mock import MagicMock, patch
 
-# from unittest.mock import MagicMock, patch
-from pdf_renamer.utils.ai_metadata import (
+from intellirename.utils.ai_metadata import (
     clean_garbled_metadata,
     evaluate_metadata_quality,
+    validate_perplexity_api_key,
 )
 
 
@@ -27,7 +29,7 @@ class TestMetadataQuality(unittest.TestCase):
 
     def test_evaluate_empty_metadata(self) -> None:
         """Test that empty metadata gets a low quality score."""
-        metadata = {}
+        metadata: Dict[str, str] = {}
         score, field_scores = evaluate_metadata_quality(metadata, self.unknown_markers)
         self.assertLessEqual(score, 0.2)
 
