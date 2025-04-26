@@ -9,7 +9,6 @@ import hashlib
 import json
 import logging
 import os
-from pathlib import Path
 from typing import Any, Dict, Optional, cast
 
 # Configure logging
@@ -67,8 +66,15 @@ def get_from_cache(
             with open(cache_file, "r", encoding="utf-8") as f:
                 log.debug(f"Cache hit for key {cache_key}")
                 return cast(Dict[str, Any], json.load(f))
-    except Exception as e:
-        log.warning(f"Error reading from cache: {str(e)}")
+    except FileNotFoundError:
+        log.debug(f"Cache file not found: {cache_file}")
+        return None
+    except (json.JSONDecodeError, OSError) as e:
+        log.exception(f"Error reading from cache file {cache_file}: {e}")
+        return None
+    except Exception as e:  # Catch unexpected errors during read
+        log.exception(f"Unexpected error reading cache file {cache_file}: {e}")
+        return None
 
     log.debug(f"Cache miss for key {cache_key}")
     return None
@@ -100,6 +106,9 @@ def save_to_cache(
 
         log.debug(f"Saved data to cache for key {cache_key}")
         return True
-    except Exception as e:
-        log.warning(f"Error saving to cache: {str(e)}")
+    except (TypeError, OSError) as e:
+        log.exception(f"Error saving to cache file {cache_file}: {e}")
+        return False
+    except Exception as e:  # Catch unexpected errors during write
+        log.exception(f"Unexpected error saving cache file {cache_file}: {e}")
         return False

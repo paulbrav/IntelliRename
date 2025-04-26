@@ -8,78 +8,124 @@ A Python tool to intelligently rename PDF and EPUB book and academic paper files
 - **AI-Powered Enhancement**: Uses Perplexity API to search the web and correct incomplete or garbled metadata
 - **Format Standardization**: Renames files to a consistent format suitable for digital libraries like Calibre
 - **Batch Processing**: Processes multiple files at once, with recursive directory support
+- **Concurrent API Calls**: Uses `asyncio` and `aiohttp` for faster processing when AI enhancement is enabled for multiple files
 - **Dry Run Mode**: Preview changes before applying them
 - **Flexible Configuration**: Control confidence thresholds and processing options
 - **Caching**: Stores API results to minimize redundant web searches
 
 ## Configuration
 
-All non-secret configuration options (such as confidence threshold, retries, temperature, max tokens, and cache settings) are now managed in `pdf_renamer/config.py`. You can edit this file to adjust the tool's behavior.
+All non-secret configuration options (such as confidence threshold, retries, temperature, max tokens, and cache settings) are now managed in `intellirename/config.py`. You can edit this file to adjust the tool's behavior.
 
-Only the Perplexity API key is set via environment variable. You can set it in your shell or in a `.env` file in the project root:
+Only the Perplexity API key is set via environment variable. You can set it in your shell:
 
 ```bash
 export PERPLEXITY_API_KEY=your_api_key_here
-```
-
-Or create a `.env` file with:
-
-```
-PERPLEXITY_API_KEY=your_api_key_here
 ```
 
 The tool will automatically load this key at runtime.
 
 ## Caching
 
-Caching options (such as `USE_CACHE` and `DEFAULT_CACHE_DIR`) are now set in `pdf_renamer/config.py`. Edit this file to enable/disable caching or change the cache directory.
+Caching options (such as `USE_CACHE` and `DEFAULT_CACHE_DIR`) are now set in `intellirename/config.py` or via environment variables:
+
+```bash
+export USE_CACHE=true
+export CACHE_DIR=~/.intellirename/cache
+```
+
+## Dependencies
+
+- Python 3.8+
+- `uv` (for installation/environment management)
+- `aiohttp`: For asynchronous HTTP requests to the Perplexity API.
+- `PyPDF2`: For PDF metadata extraction.
+- `python-dateutil`: For robust date parsing.
+- `rich`: For enhanced console logging and progress bars.
+- `python-dotenv`: For loading environment variables (like API keys).
+- `pathvalidate`: For sanitizing filenames.
+
+### Development Dependencies
+
+- `pytest`: For running tests.
+- `pytest-asyncio`: For testing asynchronous code.
+- `mypy`: For static type checking.
+- `types-*`: Type stubs for various libraries.
 
 ## Installation
 
-### Quick Install
+### Install the CLI tool via uv
+
+Clone the repository and install with uv:
 
 ```bash
 git clone https://github.com/yourusername/intellirename.git
 cd intellirename
-./install.sh
+uv tool install --from git+https://github.com/yourusername/intellirename.git
 ```
 
-The install script will:
-1. Create a virtual environment
-2. Install all dependencies
-3. Install the package in development mode
-4. Create a `.env` file from the example if it doesn't exist
-
-### Manual Installation
+If the package is published on PyPI, you can install directly:
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/intellirename.git
-cd intellirename
-
-# Create and activate a virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Install the package
-pip install -e .
-
-# Set up environment file
-cp example.env .env
-# Edit .env to add your API key
+uv tool install intellirename
 ```
+
+Now you can run the CLI like any other Unix program:
+
+```bash
+intellirename /path/to/your/books
+```
+
+Optionally upgrade or manage the tool:
+
+```bash
+uv tool upgrade intellirename
+```
+
+### Interactive/Development Install with uv
+
+For development or if you prefer managing the environment yourself:
+
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/yourusername/intellirename.git
+    cd intellirename
+    ```
+
+2.  **Create a virtual environment and sync dependencies:**
+    ```bash
+    # Create the virtual environment in .venv
+    uv venv
+
+    # Install dependencies (including optional dev dependencies)
+    uv pip install -e .[dev]
+    ```
+
+3.  **Run the tool:**
+    You can run the tool directly using `uv run` or by activating the environment first.
+
+    *   **Using `uv run`:**
+        ```bash
+        uv run intellirename /path/to/your/books --enable-ai
+        ```
+    *   **Activate the environment:**
+        ```bash
+        source .venv/bin/activate
+        # Now you can run the command directly
+        intellirename /path/to/your/books --enable-ai
+        # Deactivate when done
+        deactivate
+        ```
 
 ## API Keys
 
 This tool uses the Perplexity API for enhanced metadata extraction. You'll need to:
 
 1. Get a Perplexity API key from [https://perplexity.ai](https://perplexity.ai)
-2. Add it to your `.env` file:
-```
-PERPLEXITY_API_KEY=your_api_key_here
+2. Set the environment variable before running the tool:
+
+```bash
+export PERPLEXITY_API_KEY=your_api_key_here
 ```
 
 ## Usage
@@ -100,14 +146,15 @@ intellirename /path/to/your/books --recursive --enable-ai --confidence-threshold
 
 | Option | Description |
 |--------|-------------|
-| `directory` | Directory containing files (default: current directory) |
-| `--dry-run` | Show what would be renamed without making changes |
-| `--recursive`, `-r` | Recursively process subdirectories |
-| `--no-advanced` | Disable advanced metadata extraction (faster but less accurate) |
-| `--enable-ai` | Enable AI-powered metadata enhancement using Perplexity API |
-| `--confidence-threshold` | Confidence threshold for using AI enhancement (0.0-1.0) |
-| `--verbose`, `-v` | Enable verbose output |
-| `--type` | File types to process: pdf, epub, or all (default: all) |
+| `target` | One or more file paths or directories containing files to process. |
+| `--recursive`, `-r` | Recursively search for files in directories. |
+| `--dry-run` | Show what would be renamed without actually changing files. |
+| `--log-level` | Set the logging level (DEBUG, INFO, WARNING, ERROR). Default: INFO |
+| `--use-ai` | Enable AI-powered metadata enhancement using Perplexity API. |
+| `--confidence` | Metadata confidence score threshold (0.0-1.0) below which AI enhancement is triggered. |
+| `--no-advanced` | Disable advanced PDF metadata extraction (faster but potentially less accurate). |
+| `--min-year` | Minimum valid publication year for metadata cleaning. |
+| `--max-year` | Maximum valid publication year for metadata cleaning. |
 
 ## AI-Powered Metadata Enhancement
 

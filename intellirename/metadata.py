@@ -6,224 +6,607 @@ metadata from PDF files beyond the basic PyPDF2 extraction.
 """
 
 import logging
+import os
 import re
-from typing import Dict, List, Optional, Tuple
+import xml.etree.ElementTree as ET
+import zipfile
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional
 
 import PyPDF2
 
-# Import constants from the main module
-from intellirename.main import UNKNOWN_AUTHOR, UNKNOWN_TITLE, UNKNOWN_YEAR
+# Import PyPDF2 exceptions
+
+# Import constants
+from intellirename.constants import UNKNOWN_AUTHOR, UNKNOWN_TITLE, UNKNOWN_YEAR
+
+# Import custom exceptions
+from intellirename.exceptions import MetadataExtractionError
+
+# Import utility function needed by clean_metadata
+from intellirename.utils import make_computer_friendly
 
 log = logging.getLogger("book_renamer.metadata")
 
+# --- Filename Parsing (Moved from main.py) ---
+FILENAME_PATTERNS = [
+    # "[Publisher] Author(s) - Title (Year, Publisher).pdf"
+    re.compile(
+        r"^\[.*?\]\s*(.+?)\s*-\s*(.+?)\s*\((\d{4}).*?\)\.(pdf|epub)$", re.IGNORECASE
+    ),
+    # "Author(s) - Title (Year).pdf"
+    re.compile(r"^(.+?)\s*-\s*(.+?)\s*\((\d{4}).*?\)\.(pdf|epub)$", re.IGNORECASE),
+    # "Title - Author(s) (Year).pdf"
+    re.compile(r"^(.+?)\s*-\s*(.+?)\s*\((\d{4}).*?\)\.(pdf|epub)$", re.IGNORECASE),
+    # "Title (Year).pdf"
+    re.compile(r"^(.+?)\s*\((\d{4}).*?\)\.(pdf|epub)$", re.IGNORECASE),
+    # "Author(s) - Title.pdf"
+    re.compile(r"^(.+?)\s*-\s*(.+?)\.(pdf|epub)$", re.IGNORECASE),
+]
 
-def extract_title_from_first_page(pdf_path: str) -> Optional[str]:
+
+def extract_from_filename(filename: str) -> Dict[str, str]:
+    """Extract metadata from a filename using predefined patterns.
+    Args: filename (str): The filename to parse.
+    Returns: Dict[str, str]: Dictionary with keys 'author', 'title', 'year', 'extension'.
     """
-    Extract title by analyzing the first page content.
+    base_filename = os.path.basename(filename)
+    file_path = Path(filename)
+    extension = file_path.suffix[1:].lower() if file_path.suffix else ""
 
-    This function attempts to identify a title by looking for large font text
-    at the beginning of the document.
+    for pattern in FILENAME_PATTERNS:
+        match = pattern.match(base_filename)
+        if match:
+            groups = match.groups()
+            # Pattern: Author - Title (Year).ext or [Pub] Author - Title (Year, Pub).ext
+            if len(groups) >= 3 and groups[2].isdigit() and len(groups[2]) == 4:
+                return {
+                    "author": groups[0].strip(),
+                    "title": groups[1].strip(),
+                    "year": groups[2].strip(),
+                    "extension": groups[-1].lower(),  # Last group is extension
+                }
+            # Pattern: Title - Author (Year).ext
+            elif (
+                len(groups) >= 3 and groups[0].strip() != "" and groups[1].strip() != ""
+            ):  # Avoid matching just (Year).ext
+                return {
+                    "author": groups[1].strip(),  # Author is second group
+                    "title": groups[0].strip(),  # Title is first group
+                    "year": groups[2].strip(),
+                    "extension": groups[-1].lower(),
+                }
+            # Pattern: Title (Year).ext
+            elif len(groups) == 2 and groups[1].isdigit() and len(groups[1]) == 4:
+                return {
+                    "author": UNKNOWN_AUTHOR,
+                    "title": groups[0].strip(),
+                    "year": groups[1],
+                    "extension": groups[-1].lower(),
+                }
+            # Pattern: Author - Title.ext
+            elif len(groups) == 2:
+                return {
+                    "author": groups[0].strip(),
+                    "title": groups[1].strip(),
+                    "year": UNKNOWN_YEAR,
+                    "extension": groups[-1].lower(),
+                }
+
+    # Fallback: Use filename as title
+    return {
+        "author": UNKNOWN_AUTHOR,
+        "title": file_path.stem,  # Use Path.stem for filename without extension
+        "year": UNKNOWN_YEAR,
+        "extension": extension,
+    }
+
+
+def extract_from_pdf(reader: PyPDF2.PdfReader, pdf_path_str: str) -> Dict[str, str]:
+    """Extract metadata from an already opened PDF reader object.
+    Args:
+        reader: The PyPDF2.PdfReader object.
+        pdf_path_str (str): Path to the PDF file (for logging).
+    Returns:
+        Dict[str, str]: Dictionary with keys 'author', 'title', 'year'.
+    Raises:
+        MetadataExtractionError: If accessing metadata fails.
+    """
+    result = {"author": UNKNOWN_AUTHOR, "title": UNKNOWN_TITLE, "year": UNKNOWN_YEAR}
+    try:
+        # Access metadata directly from the reader object
+        info = reader.metadata
+
+        if info:
+            if info.author:
+                result["author"] = info.author
+            if info.title:
+                result["title"] = info.title
+            if info.creation_date:
+                try:
+                    # Attempt to parse year from creation_date
+                    if hasattr(info.creation_date, "year"):
+                        result["year"] = str(info.creation_date.year)
+                    else:
+                        date_str = str(info.creation_date)
+                        year_match = re.search(r"(19|20)\d{2}", date_str)
+                        if year_match:
+                            result["year"] = year_match.group(0)
+                except Exception as date_err:
+                    log.debug(
+                        f"Could not parse date {info.creation_date} from {pdf_path_str}: {date_err}"
+                    )
+                    pass  # Ignore date parsing errors
+
+    except Exception as e:
+        # Catch potential errors accessing reader.metadata or its attributes
+        raise MetadataExtractionError(
+            f"Unexpected error reading PDF metadata from reader for {pdf_path_str}", e
+        ) from e
+
+    return result
+
+
+def extract_from_epub(epub_path_str: str) -> Dict[str, str]:
+    """Extract metadata from an EPUB file by parsing its internal XML files.
+    Args: epub_path_str (str): Path to the EPUB file.
+    Returns: Dict[str, str]: Dictionary with keys 'author', 'title', 'year'.
+    Raises: MetadataExtractionError: If reading or parsing fails.
+    """
+    epub_path = Path(epub_path_str)
+    result = {"author": UNKNOWN_AUTHOR, "title": UNKNOWN_TITLE, "year": UNKNOWN_YEAR}
+    if not epub_path.suffix.lower() == ".epub":
+        return result
+
+    try:
+        with zipfile.ZipFile(epub_path, "r") as zip_ref:
+            try:
+                container = zip_ref.read("META-INF/container.xml")
+                container_root = ET.fromstring(container)
+                ns = {"ns": "urn:oasis:names:tc:opendocument:xmlns:container"}
+                rootfile = container_root.find(".//ns:rootfile", ns)
+                if rootfile is None or "full-path" not in rootfile.attrib:
+                    raise MetadataExtractionError(
+                        f"Invalid container.xml in {epub_path}"
+                    )
+
+                content_path = rootfile.get("full-path")
+                # Check if content_path is None before proceeding
+                if content_path is None:
+                    raise MetadataExtractionError(
+                        f"Missing full-path in container.xml for {epub_path}"
+                    )
+
+                content = zip_ref.read(
+                    content_path
+                )  # Now content_path is guaranteed to be str
+                content_root = ET.fromstring(content)
+                dc_ns = {"dc": "http://purl.org/dc/elements/1.1/"}
+
+                title_elem = content_root.find(".//dc:title", dc_ns)
+                if title_elem is not None and title_elem.text:
+                    result["title"] = title_elem.text.strip()
+
+                creator_elem = content_root.find(".//dc:creator", dc_ns)
+                if creator_elem is not None and creator_elem.text:
+                    result["author"] = creator_elem.text.strip()
+
+                date_elem = content_root.find(".//dc:date", dc_ns)
+                if date_elem is not None and date_elem.text:
+                    date_match = re.search(r"\b(19|20)\d{2}\b", date_elem.text)
+                    if date_match:
+                        result["year"] = date_match.group(0)
+
+            except (KeyError, ET.ParseError, ValueError, IndexError) as e:
+                raise MetadataExtractionError(
+                    f"Error parsing EPUB XML in {epub_path}", e
+                ) from e
+            except MetadataExtractionError:  # Re-raise errors from checks above
+                raise
+
+    except (zipfile.BadZipFile, IOError, OSError) as e:
+        raise MetadataExtractionError(f"Error reading EPUB file {epub_path}", e) from e
+    except Exception as e:
+        raise MetadataExtractionError(
+            f"Unexpected error reading EPUB {epub_path}", e
+        ) from e
+
+    return result
+
+
+# --- Merging and Cleaning (Moved from main.py) ---
+
+
+def merge_metadata(
+    filename_data: Dict[str, str],
+    content_data: Dict[str, str],
+    advanced_data: Dict[str, str],
+) -> Dict[str, str]:
+    """Merge metadata from filename, file content, and advanced extraction.
+    Prioritizes filename > content > advanced for author/title.
+    Prioritizes filename > advanced > content for year.
+    Args:
+        filename_data: Metadata from filename.
+        content_data: Metadata from file content (PDF/EPUB).
+        advanced_data: Metadata from advanced PDF analysis.
+    Returns:
+        Merged metadata dictionary.
+    """
+    # Start with filename data as base, including the 'extension'
+    result = filename_data.copy()
+
+    # Ensure advanced_data has default keys if empty
+    advanced_data.setdefault("author", UNKNOWN_AUTHOR)
+    advanced_data.setdefault("title", UNKNOWN_TITLE)
+    advanced_data.setdefault("year", UNKNOWN_YEAR)
+
+    # Ensure content_data has default keys if empty (might happen if file is not PDF/EPUB)
+    content_data.setdefault("author", UNKNOWN_AUTHOR)
+    content_data.setdefault("title", UNKNOWN_TITLE)
+    content_data.setdefault("year", UNKNOWN_YEAR)
+
+    # Author: filename > content > advanced
+    if result.get("author", UNKNOWN_AUTHOR) == UNKNOWN_AUTHOR:
+        if content_data.get("author", UNKNOWN_AUTHOR) != UNKNOWN_AUTHOR:
+            result["author"] = content_data["author"]
+        elif advanced_data.get("author", UNKNOWN_AUTHOR) != UNKNOWN_AUTHOR:
+            result["author"] = advanced_data["author"]
+
+    # Title: filename > content > advanced
+    if result.get("title", UNKNOWN_TITLE) == UNKNOWN_TITLE:
+        if content_data.get("title", UNKNOWN_TITLE) != UNKNOWN_TITLE:
+            result["title"] = content_data["title"]
+        elif advanced_data.get("title", UNKNOWN_TITLE) != UNKNOWN_TITLE:
+            result["title"] = advanced_data["title"]
+
+    # Year: filename > advanced > content
+    if result.get("year", UNKNOWN_YEAR) == UNKNOWN_YEAR:
+        if advanced_data.get("year", UNKNOWN_YEAR) != UNKNOWN_YEAR:
+            result["year"] = advanced_data["year"]
+        elif content_data.get("year", UNKNOWN_YEAR) != UNKNOWN_YEAR:
+            result["year"] = content_data["year"]
+
+    return result
+
+
+def clean_metadata(
+    metadata: Dict[str, str], min_year: int, max_year: int
+) -> Dict[str, str]:
+    """Clean and standardize extracted metadata fields.
 
     Args:
-        pdf_path: Path to the PDF file
+        metadata: The raw extracted metadata.
+        min_year: The minimum acceptable publication year.
+        max_year: The maximum acceptable publication year.
 
     Returns:
-        Extracted title or None if extraction failed
+        Dictionary containing cleaned metadata.
     """
+    result = metadata.copy()
+
+    # Clean author names
+    author = result.get("author", UNKNOWN_AUTHOR)
+    # Handle multiple authors separated by common delimiters
+    authors = [
+        a.strip()
+        for a in re.split(r"[,;&]|\\band\\b", author, flags=re.IGNORECASE)
+        if a.strip()
+    ]
+
+    processed_authors = []
+    for auth in authors:
+        # Remove extra spaces, keep original capitalization (often LastName, FirstName)
+        processed_authors.append(" ".join(auth.split()))
+
+    if len(processed_authors) > 3:
+        result["author"] = f"{processed_authors[0]}_et_al"
+    elif len(processed_authors) > 0:
+        # Join with underscore for computer-friendly internal representation
+        result["author"] = "_".join(processed_authors)
+    else:
+        result["author"] = UNKNOWN_AUTHOR
+
+    # Clean title: remove extra whitespace, convert non-proper nouns to title case?
+    # For now, just replace spaces with underscores for internal representation
+    title = result.get("title", UNKNOWN_TITLE)
+    result["title"] = " ".join(title.split())  # Consolidate whitespace
+
+    # Validate year using provided range
+    year_str = result.get("year", UNKNOWN_YEAR)
     try:
-        with open(pdf_path, "rb") as f:
-            pdf = PyPDF2.PdfReader(f)
-            if len(pdf.pages) > 0:
-                # Extract text from the first page
-                first_page_text = pdf.pages[0].extract_text()
-                if not first_page_text:
-                    return None
+        year_int = int(year_str)
+        # Use passed-in min_year and max_year for validation
+        if not (min_year <= year_int <= max_year):
+            log.debug(
+                f"Year {year_int} is outside the valid range [{min_year}-{max_year}]."
+                f" Resetting to {UNKNOWN_YEAR}."
+            )
+            result["year"] = UNKNOWN_YEAR
+        else:
+            result["year"] = str(year_int)  # Ensure it's stored as string
+    except (ValueError, TypeError):
+        log.debug(f"Invalid year format '{year_str}'. Resetting to {UNKNOWN_YEAR}.")
+        result["year"] = UNKNOWN_YEAR
 
-                # Split by newlines and get first few non-empty lines
-                lines = [
-                    line.strip() for line in first_page_text.split("\n") if line.strip()
-                ]
-                if not lines:
-                    return None
+    # Make fields computer-friendly using the utility function
+    result["author"] = make_computer_friendly(result["author"])
+    result["title"] = make_computer_friendly(result["title"])
 
-                # The title is often one of the first few lines
-                # Heuristic: Take the longest line from the first 3 lines that's not too long
-                candidate_lines = lines[:3]
-                title_candidates = [
-                    line for line in candidate_lines if 3 < len(line) < 100
-                ]
+    # Keep extension if it exists
+    result["extension"] = metadata.get("extension", "")
 
-                if title_candidates:
-                    return max(title_candidates, key=len)
+    return result
 
-                # If no good candidates found, just return the first line
-                return lines[0][:100] if lines else None
-    except Exception:
-        return None
+
+# --- Advanced PDF Analysis Helpers ---
+
+
+def _extract_text_from_pages(reader: PyPDF2.PdfReader, page_indices: List[int]) -> str:
+    """Helper to extract text from specific pages using a PdfReader object."""
+    text = ""
+    try:
+        for i in page_indices:
+            if 0 <= i < len(reader.pages):
+                page = reader.pages[i]
+                text += page.extract_text() or ""
+    except Exception as e:
+        # Log error during text extraction but don't necessarily fail the whole process
+        log.warning(f"Error extracting text from pages {page_indices}: {e}")
+    return text
+
+
+def extract_title_from_first_page(
+    reader: PyPDF2.PdfReader, pdf_path_str: str
+) -> Optional[str]:
+    """Attempt to extract a title from the first page text using a PdfReader.
+
+    Looks for larger font sizes or text near the top.
+    Args:
+        reader: The PyPDF2.PdfReader object.
+        pdf_path_str: The path to the PDF file (for logging).
+    Returns:
+        The extracted title string, or None if not found.
+    """
+    log.debug(f"Attempting advanced title extraction for: {pdf_path_str}")
+    try:
+        if not reader.pages:
+            return None
+
+        # Extract text from the first page
+        first_page_text = _extract_text_from_pages(reader, [0])
+        if not first_page_text:
+            return None
+
+        lines = first_page_text.split("\n")
+        potential_titles = []
+
+        # Simple heuristic: Look for capitalized lines near the top, non-trivial length
+        for line in lines[:15]:  # Check top lines
+            stripped_line = line.strip()
+            if (
+                len(stripped_line) > 5
+                and stripped_line == stripped_line.title()  # Check title case
+                # Avoid lines containing common non-title keywords or just a year
+                and not re.search(
+                    r"(Abstract|Introduction|Contents|DOI:|\d{4})",
+                    stripped_line,
+                    re.IGNORECASE,
+                )
+                and not stripped_line.isupper()  # Avoid all caps lines usually headers/footers
+            ):
+                potential_titles.append(stripped_line)
+
+        # Prioritize shorter, earlier potential titles if multiple found
+        if potential_titles:
+            best_title = min(
+                potential_titles, key=len
+            )  # Simplistic: shortest title-cased line
+            log.debug(f"Advanced extracted title: {best_title}")
+            return best_title
+
+    except Exception as e:
+        log.warning(f"Error during advanced title extraction for {pdf_path_str}: {e}")
 
     return None
 
 
-def extract_authors_from_first_page(pdf_path: str) -> Optional[str]:
-    """
-    Extract authors by analyzing the first page content.
+def extract_authors_from_first_page(
+    reader: PyPDF2.PdfReader, pdf_path_str: str
+) -> Optional[str]:
+    """Attempt to extract author names from the first page text using a PdfReader.
 
-    This function attempts to identify authors typically listed after the title.
-
+    Looks for patterns common in academic papers or books.
     Args:
-        pdf_path: Path to the PDF file
-
+        reader: The PyPDF2.PdfReader object.
+        pdf_path_str: The path to the PDF file (for logging).
     Returns:
-        Extracted authors or None if extraction failed
+        A string of author names (e.g., "John Smith, Jane Doe"), or None.
     """
+    log.debug(f"Attempting advanced author extraction for: {pdf_path_str}")
     try:
-        with open(pdf_path, "rb") as f:
-            pdf = PyPDF2.PdfReader(f)
-            if len(pdf.pages) > 0:
-                # Extract text from the first page
-                first_page_text = pdf.pages[0].extract_text()
-                if not first_page_text:
-                    return None
+        if not reader.pages:
+            return None
 
-                # Split by newlines
-                lines = [
-                    line.strip() for line in first_page_text.split("\n") if line.strip()
-                ]
-                if len(lines) < 2:
-                    return None
+        # Extract text from the first page
+        first_page_text = _extract_text_from_pages(reader, [0])
+        if not first_page_text:
+            return None
 
-                # Check lines after potential title for author patterns
-                for i in range(1, min(5, len(lines))):
-                    line = lines[i]
+        lines = first_page_text.split("\n")
+        potential_authors: List[str] = []
 
-                    # Common author indicators
-                    if re.search(r"by\s+", line, re.IGNORECASE):
-                        return line.split("by", 1)[1].strip()
+        # Heuristic 1: Look for lines with multiple capitalized words, possibly with commas/and
+        # Avoid lines that look like titles or affiliations
+        author_pattern = re.compile(
+            r"^[A-Z][a-z]+(?: [A-Z][a-z\.]*)+(?:(?:, | and | & )+[A-Z][a-z]+(?: [A-Z][a-z\.]*)+)*$"
+        )
 
-                    # Look for patterns like "John Doe, Jane Smith"
-                    if re.search(
-                        r"^[A-Z][a-z]+\s+[A-Z][a-z]+(\s*,\s*[A-Z][a-z]+\s+[A-Z][a-z]+)*$",
-                        line,
+        for line in lines[:20]:  # Check lines below potential title area
+            stripped = line.strip()
+            if len(stripped) > 5 and len(stripped) < 100:  # Reasonable length
+                # Check if it looks like a name list
+                if author_pattern.match(stripped):
+                    # Basic check to avoid matching Title Cased Lines
+                    if (
+                        not stripped.endswith((".", ":", "?", "!"))
+                        and stripped == stripped.title()
                     ):
-                        return line
+                        potential_authors.append(stripped)
+                        log.debug(f"Found potential author line: {stripped}")
+                        break  # Often authors are on one line just below title
 
-                    # Look for email addresses which often appear with author names
-                    if "@" in line and len(line) < 100:
-                        return line
+        # Heuristic 2: Look for lines starting with "By" or "Author(s):"
+        if not potential_authors:
+            for line in lines[:20]:
+                stripped = line.strip()
+                if stripped.lower().startswith("by ") and len(stripped) > 3:
+                    author_part = stripped[3:].strip()
+                    if len(author_part) > 3:
+                        potential_authors.append(author_part)
+                        log.debug(
+                            f"Found potential author line starting with 'By': {author_part}"
+                        )
+                        break
+                elif stripped.lower().startswith("author") and len(stripped) > 7:
+                    author_part = stripped.split(":")[-1].strip()
+                    if len(author_part) > 3:
+                        potential_authors.append(author_part)
+                        log.debug(
+                            f"Found potential author line starting with 'Author': {author_part}"
+                        )
+                        break
 
-                    # Look for affiliation indicators
-                    if re.search(
-                        r"University|Institute|College|Department", line, re.IGNORECASE
-                    ):
-                        # Try to get the previous line as the author
-                        if i > 1:
-                            return lines[i - 1]
+        if potential_authors:
+            # Simple approach: take the first plausible line found
+            # Could be improved with scoring or checking against affiliations
+            authors_str = potential_authors[0]
+            # Clean up common artifacts like email addresses if accidentally included
+            authors_str = re.sub(r"\S+@\S+\s*", "", authors_str).strip()
+            log.debug(f"Advanced extracted authors: {authors_str}")
+            return authors_str
 
-                # If nothing found, return the second line as a guess
-                if len(lines) > 1 and len(lines[1]) < 100:
-                    return lines[1]
-    except Exception:
-        return None
+    except Exception as e:
+        log.warning(f"Error during advanced author extraction for {pdf_path_str}: {e}")
 
     return None
 
 
-def extract_year_from_content(pdf_path: str) -> Optional[str]:
-    """
-    Extract publication year by analyzing the PDF content.
+def extract_year_from_content(
+    reader: PyPDF2.PdfReader,
+    pdf_path_str: str,
+    min_year: int = 1800,
+    max_year: int = datetime.now().year,
+) -> Optional[str]:
+    """Attempt to extract a plausible publication year from PDF content using a PdfReader.
 
-    This function looks for year patterns in the document text.
-
+    Scans first and last few pages for 4-digit years within a plausible range.
     Args:
-        pdf_path: Path to the PDF file
-
+        reader: The PyPDF2.PdfReader object.
+        pdf_path_str: The path to the PDF file (for logging).
+        min_year (int): Minimum plausible year.
+        max_year (int): Maximum plausible year (current year by default).
     Returns:
-        Extracted year or None if extraction failed
+        The extracted year string, or None if not found.
     """
+    log.debug(f"Attempting advanced year extraction for: {pdf_path_str}")
+    years_found = []
+    num_pages = len(reader.pages)
+
+    # Pages to scan: first 2 and last 2 (avoiding duplicates if few pages)
+    pages_to_scan_indices = list(set([0, 1, num_pages - 2, num_pages - 1]))
+    pages_to_scan_indices = [p for p in pages_to_scan_indices if 0 <= p < num_pages]
+
     try:
-        with open(pdf_path, "rb") as f:
-            pdf = PyPDF2.PdfReader(f)
+        text_to_scan = _extract_text_from_pages(reader, pages_to_scan_indices)
+        if not text_to_scan:
+            return None
 
-            # Get text from first few pages (to find publication info)
-            all_text = ""
-            for i in range(min(3, len(pdf.pages))):
-                page_text = pdf.pages[i].extract_text()
-                if page_text:
-                    all_text += page_text
-
-            if not all_text:
-                return None
-
-            # Look for year patterns with publication context
-            # Priority to year in copyright notice
-            copyright_match = re.search(
-                r"copyright\s+©?\s*(\d{4})", all_text, re.IGNORECASE
-            )
-            if copyright_match:
-                return copyright_match.group(1)
-
-            # Look for year with publication context
-            pub_year_match = re.search(
-                r"published\s+in\s+(\d{4})", all_text, re.IGNORECASE
-            )
-            if pub_year_match:
-                return pub_year_match.group(1)
-
-            # Try to find conference/journal with year
-            conf_match = re.search(
-                r"proceedings\s+of.*?(\d{4})", all_text, re.IGNORECASE
-            )
-            if conf_match:
-                return conf_match.group(1)
-
-            # Last resort: find any 4-digit number that looks like a year (current century or previous)
-            import datetime
-
-            current_year = datetime.datetime.now().year
-            year_matches = re.findall(r"\b((?:19|20)\d{2})\b", all_text)
-            if year_matches:
-                # Filter to only possible years (not future, not too old)
-                valid_years = [
-                    int(y) for y in year_matches if 1900 <= int(y) <= current_year
+        # Look for 4-digit numbers within the plausible year range
+        # \b ensures we match whole words/numbers
+        year_pattern = re.compile(r"\b(1[8-9]\d{2}|20\d{2})\b")
+        for match in year_pattern.finditer(text_to_scan):
+            year = int(match.group(0))
+            if min_year <= year <= max_year:
+                # Look for context like "Published", "Copyright", "©"
+                context_window = text_to_scan[
+                    max(0, match.start() - 20) : min(
+                        len(text_to_scan), match.end() + 20
+                    )
                 ]
-                if valid_years:
-                    # Get the most frequent year
-                    from collections import Counter
+                if re.search(
+                    r"(publish|copyright|©|\bDate\b|received|accepted)",
+                    context_window,
+                    re.IGNORECASE,
+                ):
+                    years_found.append(str(year))
+                    log.debug(
+                        f"Found plausible year {year} with context: ...{context_window}... "
+                    )
+                elif (
+                    len(years_found) < 5
+                ):  # Collect a few context-less years just in case
+                    years_found.append(str(year))
+                    log.debug(f"Found plausible year {year} without strong context.")
 
-                    return str(Counter(valid_years).most_common(1)[0][0])
-    except Exception:
-        return None
+        if years_found:
+            # Prioritize years with context, often the latest year found is publication year
+            # Simple heuristic: return the most frequent year found
+            from collections import Counter
+
+            year_counts = Counter(years_found)
+            most_common_year = year_counts.most_common(1)[0][0]
+            log.debug(f"Advanced extracted year: {most_common_year}")
+            return most_common_year
+
+    except Exception as e:
+        log.warning(f"Error during advanced year extraction for {pdf_path_str}: {e}")
 
     return None
 
 
-def extract_advanced_metadata(pdf_path: str) -> Dict[str, str]:
-    """
-    Extract metadata using advanced heuristics.
+# --- Main Advanced Extraction Function ---
 
-    This function combines various extraction methods to get the best metadata possible.
+
+def extract_advanced_metadata(
+    reader: PyPDF2.PdfReader, pdf_path_str: str
+) -> Dict[str, str]:
+    """Extract metadata by analyzing PDF content (first page text, etc.) using a PdfReader.
 
     Args:
-        pdf_path: Path to the PDF file
+        reader: The PyPDF2.PdfReader object.
+        pdf_path_str: The path to the PDF file (for logging).
 
     Returns:
-        Dict containing extracted author, title, and year
+        Dict[str, str]: Dictionary with 'author', 'title', 'year'.
+    Raises:
+        MetadataExtractionError: If text extraction or analysis fails unexpectedly.
     """
     result = {"author": UNKNOWN_AUTHOR, "title": UNKNOWN_TITLE, "year": UNKNOWN_YEAR}
 
-    # Try to extract title
-    title = extract_title_from_first_page(pdf_path)
-    if title:
-        result["title"] = title
+    try:
+        # Extract title from first page text
+        title = extract_title_from_first_page(reader, pdf_path_str)
+        if title:
+            result["title"] = title
 
-    # Try to extract authors
-    authors = extract_authors_from_first_page(pdf_path)
-    if authors:
-        result["author"] = authors
+        # Extract authors from first page text
+        authors = extract_authors_from_first_page(reader, pdf_path_str)
+        if authors:
+            result["author"] = authors
 
-    # Try to extract year
-    year = extract_year_from_content(pdf_path)
-    if year:
-        result["year"] = year
+        # Extract year from content analysis
+        year = extract_year_from_content(
+            reader, pdf_path_str
+        )  # Add min/max year args if needed
+        if year:
+            result["year"] = year
 
+    except Exception as e:
+        # Wrap unexpected errors from helpers
+        raise MetadataExtractionError(
+            f"Advanced metadata analysis failed for {pdf_path_str}", e
+        ) from e
+
+    log.debug(f"Advanced metadata extraction result for {pdf_path_str}: {result}")
     return result

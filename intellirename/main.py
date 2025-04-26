@@ -8,46 +8,62 @@ Uses AI and web search capabilities to enhance metadata quality when needed.
 """
 
 import argparse
+import asyncio
 import logging
-import os
 import re
 import sys
-from datetime import datetime
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Awaitable, Dict, List, Optional, Tuple, Union
 
-import dateutil.parser
+# Third-party imports
 import PyPDF2
-from dateutil import parser as date_parser
-from dotenv import load_dotenv
+from PyPDF2.errors import PyPdfError
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
-
-# Import AI metadata enhancement
-try:
-    from intellirename.utils.ai_metadata import (
-        enhance_metadata,
-        validate_perplexity_api_key,
-    )
-
-    AI_AVAILABLE = True
-except ImportError:
-    AI_AVAILABLE = False
-
-# Configure logging with rich
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(message)s",
-    datefmt="[%X]",
-    handlers=[RichHandler(rich_tracebacks=True)],
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
 )
-log = logging.getLogger("book_renamer")
-console = Console()
 
-# Get configuration from environment
-DEFAULT_CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.7"))
+# Local application imports
+from . import config
+from .ai import (
+    # AI_AVAILABLE, # Removed - Check is implicit in import success
+    enhance_metadata,
+    validate_perplexity_api_key,
+)
+from .constants import (
+    UNKNOWN_AUTHOR,
+    UNKNOWN_TITLE,
+    UNKNOWN_YEAR,
+)
+from .exceptions import (
+    AICommunicationError,
+    AIProcessingError,
+    ConfigurationError,
+    FileOperationError,
+    IntelliRenameError,
+    MetadataExtractionError,
+)
+from .metadata import (
+    clean_metadata,
+    extract_advanced_metadata,
+    extract_from_epub,
+    extract_from_filename,
+    extract_from_pdf,
+    merge_metadata,
+)
+from .utils import (
+    find_files,
+    generate_new_filename,
+    rename_file,
+)
 
 # Filename parsing patterns
 FILENAME_PATTERNS = [
@@ -65,748 +81,708 @@ FILENAME_PATTERNS = [
     re.compile(r"^(.+?)\s*-\s*(.+?)\.(pdf|epub)$", re.IGNORECASE),
 ]
 
-# Placeholder values for missing information
-UNKNOWN_AUTHOR = "Unknown_Author"
-UNKNOWN_TITLE = "Untitled"
-UNKNOWN_YEAR = "0000"
+# Configure logging with rich
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    datefmt="[%X]",
+    handlers=[RichHandler(rich_tracebacks=True)],
+)
+log = logging.getLogger("book_renamer")
+console = Console()
 
-# Illegal filesystem characters to replace
-ILLEGAL_CHARS = r'[<>:"/\\|?*]'
-
-# Characters to replace with underscores for computer-friendly names
-REPLACE_WITH_UNDERSCORE = r"[ ,;()]"
-
-
-def extract_from_filename(filename: str) -> Dict[str, str]:
-    """
-    Extract metadata from the filename using predefined patterns.
-
-    Args:
-        filename: The filename to parse
-
-    Returns:
-        Dict containing extracted author, title, and year
-    """
-    base_filename = os.path.basename(filename)
-
-    for pattern in FILENAME_PATTERNS:
-        match = pattern.match(base_filename)
-        if match:
-            groups = match.groups()
-            if len(groups) >= 3:  # Author, Title, Year, (Extension)
-                return {
-                    "author": groups[0].strip(),
-                    "title": groups[1].strip(),
-                    "year": groups[2].strip(),
-                    "extension": groups[3].lower()
-                    if len(groups) > 3
-                    else Path(filename).suffix[1:].lower(),
-                }
-            elif len(groups) == 2:
-                # Could be Title, Year or Author, Title
-                if groups[1].isdigit() and len(groups[1]) == 4:
-                    return {
-                        "author": UNKNOWN_AUTHOR,
-                        "title": groups[0].strip(),
-                        "year": groups[1],
-                        "extension": Path(filename).suffix[1:].lower(),
-                    }
-                else:
-                    return {
-                        "author": groups[0].strip(),
-                        "title": groups[1].strip(),
-                        "year": UNKNOWN_YEAR,
-                        "extension": Path(filename).suffix[1:].lower(),
-                    }
-
-    # If no pattern matched, just use the filename as the title
-    return {
-        "author": UNKNOWN_AUTHOR,
-        "title": os.path.splitext(base_filename)[0],
-        "year": UNKNOWN_YEAR,
-        "extension": Path(filename).suffix[1:].lower(),
-    }
+# Load configuration early (consider moving if setup_logging needs config values)
+try:
+    config.load_config()
+except ConfigurationError as e:
+    # Use basic print for early config errors before Rich is setup
+    print(f"Fatal Configuration Error: {e}", file=sys.stderr)
+    sys.exit(1)
 
 
-def extract_from_pdf(pdf_path: str) -> Dict[str, str]:
-    """
-    Extract metadata from PDF file.
+def setup_logging(level: str = "INFO") -> None:
+    """Configure logging using RichHandler.
 
     Args:
-        pdf_path: Path to the PDF file
-
-    Returns:
-        Dict containing extracted author, title, and year
+        level (str): Logging level (e.g., "INFO", "DEBUG").
     """
-    result = {"author": UNKNOWN_AUTHOR, "title": UNKNOWN_TITLE, "year": UNKNOWN_YEAR}
+    log_level = getattr(logging, level.upper(), logging.INFO)
+    # Get the root logger or a specific one
+    # Using root logger ensures libraries also use this config if they don't set their own
+    # logger = logging.getLogger("intellirename")
+    logger = logging.getLogger()  # Get root logger
+    logger.setLevel(log_level)
 
-    if not pdf_path.lower().endswith(".pdf"):
-        return result
+    # Remove existing handlers to avoid duplicate messages
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
 
-    try:
-        with open(pdf_path, "rb") as f:
-            pdf = PyPDF2.PdfReader(f)
-            info = pdf.metadata
+    # Add RichHandler
+    rich_handler = RichHandler(
+        rich_tracebacks=True,
+        tracebacks_show_locals=True,  # Optional: show locals in tracebacks
+        markup=True,
+    )
+    logger.addHandler(rich_handler)
 
-            if info and info.author:
-                result["author"] = info.author
+    # Optional: Adjust logging level for specific libraries
+    # logging.getLogger("PyPDF2").setLevel(logging.WARNING)
 
-            if info and info.title:
-                result["title"] = info.title
-
-            # Try to extract year from creation date
-            if info and info.creation_date:
-                try:
-                    # Handle both datetime objects and string formats
-                    if hasattr(info.creation_date, "year"):
-                        result["year"] = str(info.creation_date.year)
-                    else:
-                        # Try to find a year in whatever format we have
-                        date_str = str(info.creation_date)
-                        year_match = re.search(r"(19|20)\d{2}", date_str)
-                        if year_match:
-                            result["year"] = year_match.group(0)
-                except Exception:
-                    pass
-    except Exception as e:
-        log.warning(f"Error reading PDF metadata from {pdf_path}: {str(e)}")
-
-    return result
+    log = logging.getLogger(__name__)  # Get logger for this module after setup
+    log.debug("Logging setup complete.")
 
 
-def extract_from_epub(epub_path: str) -> Dict[str, str]:
-    """
-    Extract metadata from EPUB file.
+# --- Helper Functions for process_file ---
+
+
+def _extract_initial_metadata(
+    file_path: Path, use_advanced: bool
+) -> Tuple[Dict[str, Any], Optional[PyPDF2.PdfReader]]:
+    """Extract initial metadata from filename and content (PDF/EPUB).
 
     Args:
-        epub_path: Path to the EPUB file
+        file_path (Path): Path to the file.
+        use_advanced (bool): Whether to use advanced PDF metadata extraction.
 
     Returns:
-        Dict containing extracted author, title, and year
+        Tuple[Dict[str, Any], Optional[PyPDF2.PdfReader]]: Merged metadata and PDF reader object (if PDF).
+
+    Raises:
+        MetadataExtractionError: If metadata extraction fails.
+        FileNotFoundError: If the file does not exist.
+        IOError: If there is an error opening the file.
     """
-    result = {"author": UNKNOWN_AUTHOR, "title": UNKNOWN_TITLE, "year": UNKNOWN_YEAR}
+    original_filename = file_path.name
+    file_suffix = file_path.suffix.lower()
+    pdf_reader = None
 
-    if not epub_path.lower().endswith(".epub"):
-        return result
+    # Step 1: Extract from filename
+    filename_data = extract_from_filename(original_filename)
 
-    try:
-        # Try to import epub library only when needed
-        import zipfile
-        from xml.etree import ElementTree as ET
+    # Step 2 & 3: Extract from content (PDF/EPUB)
+    content_data: Dict[str, Any] = {}
+    advanced_data: Dict[str, Any] = {}
 
-        # EPUB files are ZIP files with metadata in META-INF/container.xml and content.opf
-        with zipfile.ZipFile(epub_path, "r") as zip_ref:
-            # First, find the content.opf file location
-            try:
-                container = zip_ref.read("META-INF/container.xml")
-                container_root = ET.fromstring(container)
-                # Find the content.opf path
-                ns = {"ns": "urn:oasis:names:tc:opendocument:xmlns:container"}
-                rootfile = container_root.find(".//ns:rootfile", ns)
-                if rootfile is None:
-                    raise ValueError("Could not find rootfile element in container.xml")
-                content_path = rootfile.get("full-path")
+    if file_suffix == ".pdf":
+        try:
+            # Keep the file open and pass the reader object
+            pdf_file = open(file_path, "rb")  # Keep file open for potential later use
+            pdf_reader = PyPDF2.PdfReader(pdf_file)
 
-                # Read the content.opf file
-                if content_path is None:
-                    raise ValueError(
-                        "Could not find full-path attribute in rootfile element"
-                    )
-                content = zip_ref.read(content_path)
-                content_root = ET.fromstring(content)
+            content_data = extract_from_pdf(pdf_reader, str(file_path))
+            if use_advanced:
+                advanced_data = extract_advanced_metadata(pdf_reader, str(file_path))
 
-                # Define namespaces
-                dc_ns = {
-                    "dc": "http://purl.org/dc/elements/1.1/",
-                    "opf": "http://www.idpf.org/2007/opf",
-                }
-
-                # Extract metadata
-                title_elem = content_root.find(".//dc:title", dc_ns)
-                if title_elem is not None and title_elem.text:
-                    result["title"] = title_elem.text
-
-                # Author might be in creator element
-                creator_elem = content_root.find(".//dc:creator", dc_ns)
-                if creator_elem is not None and creator_elem.text:
-                    result["author"] = creator_elem.text
-
-                # Look for date, which might contain year
-                date_elem = content_root.find(".//dc:date", dc_ns)
-                if date_elem is not None and date_elem.text:
-                    # Try to extract year from date
-                    date_match = re.search(r"\b(19|20)\d{2}\b", date_elem.text)
-                    if date_match:
-                        result["year"] = date_match.group(0)
-            except (KeyError, ET.ParseError) as e:
-                log.warning(
-                    f"Error parsing EPUB metadata structure in {epub_path}: {str(e)}"
-                )
-
-    except ImportError:
-        log.warning("zipfile module not available; skipping EPUB metadata extraction")
-    except Exception as e:
-        log.warning(f"Error reading EPUB metadata from {epub_path}: {str(e)}")
-
-    return result
-
-
-def extract_all_metadata(file_path: str, use_advanced: bool) -> Dict[str, Any]:
-    """
-    Extract metadata using advanced heuristics as a fallback.
-
-    Args:
-        file_path: Path to the file
-
-    Returns:
-        Dict containing extracted author, title, and year
-    """
-    if use_advanced:
-        if file_path.lower().endswith(".pdf"):
-            try:
-                from intellirename.metadata import extract_advanced_metadata
-
-                return extract_advanced_metadata(file_path)
-            except ImportError:
-                log.error("PyPDF2 is required for advanced PDF metadata extraction.")
-                log.error("Please install it: pip install PyPDF2")
-                return {}
-            except Exception as e:
-                log.error(f"Error during advanced PDF metadata extraction: {e}")
-                return {}
-        else:
-            log.warning(
-                f"Advanced metadata extraction only supported for PDF. Skipping for {file_path}"
+        except PyPdfError as e:
+            log.error(f"Failed to read PDF structure for {original_filename}: {e}")
+            if pdf_reader and hasattr(pdf_reader.stream, "close"):
+                pdf_reader.stream.close()
+            raise MetadataExtractionError(
+                f"Invalid or corrupt PDF: {original_filename}", e
+            ) from e
+        except (IOError, OSError) as e:
+            log.error(f"IO error opening PDF {original_filename}: {e}")
+            if pdf_reader and hasattr(pdf_reader.stream, "close"):
+                pdf_reader.stream.close()
+            raise MetadataExtractionError(
+                f"Cannot open PDF: {original_filename}", e
+            ) from e
+        except Exception as e:
+            log.exception(
+                f"Unexpected error during PDF metadata extraction for {original_filename}"
             )
-    return {}
+            if pdf_reader and hasattr(pdf_reader.stream, "close"):
+                pdf_reader.stream.close()
+            raise MetadataExtractionError(
+                f"PDF metadata error: {original_filename}", e
+            ) from e
+
+    elif file_suffix == ".epub":
+        try:
+            content_data = extract_from_epub(str(file_path))
+        except MetadataExtractionError as e:
+            log.warning(f"EPUB metadata extraction failed for {original_filename}: {e}")
+            # Proceed with potentially empty content_data
+
+    # Step 4: Merge
+    merged_data = merge_metadata(filename_data, content_data, advanced_data)
+    merged_data["original_filename"] = original_filename
+
+    return merged_data, pdf_reader
 
 
-def merge_metadata(
-    filename_data: Dict[str, str],
-    content_data: Dict[str, str],
-    advanced_data: Dict[str, str],
-) -> Dict[str, str]:
-    """
-    Merge metadata from filename, file content, and advanced extraction, prioritizing filename data.
-
-    Args:
-        filename_data: Metadata extracted from filename
-        content_data: Metadata extracted from file content
-        advanced_data: Metadata extracted using advanced heuristics
-
-    Returns:
-        Dict containing merged metadata
-    """
-    result = filename_data.copy()
-
-    # Author: Prioritize filename > content metadata > advanced extraction
-    if result["author"] == UNKNOWN_AUTHOR:
-        if content_data["author"] != UNKNOWN_AUTHOR:
-            result["author"] = content_data["author"]
-        elif advanced_data["author"] != UNKNOWN_AUTHOR:
-            result["author"] = advanced_data["author"]
-
-    # Title: Prioritize filename > content metadata > advanced extraction
-    if result["title"] == UNKNOWN_TITLE:
-        if content_data["title"] != UNKNOWN_TITLE:
-            result["title"] = content_data["title"]
-        elif advanced_data["title"] != UNKNOWN_TITLE:
-            result["title"] = advanced_data["title"]
-
-    # Year: Prioritize filename > advanced extraction > content metadata
-    if result["year"] == UNKNOWN_YEAR:
-        if advanced_data["year"] != UNKNOWN_YEAR:
-            result["year"] = advanced_data["year"]
-        elif content_data["year"] != UNKNOWN_YEAR:
-            result["year"] = content_data["year"]
-
-    return result
-
-
-def clean_metadata(metadata: Dict[str, str]) -> Dict[str, str]:
-    """
-    Clean and standardize extracted metadata.
+async def _conditionally_enhance_metadata(
+    metadata: Dict[str, Any],
+    file_path: Path,
+    use_ai: bool,
+    confidence_threshold: float,
+    min_year: int,
+    max_year: int,
+) -> Dict[str, Any]:
+    """Clean metadata and optionally enhance it using AI if conditions are met.
 
     Args:
-        metadata: The raw extracted metadata
+        metadata (Dict[str, Any]): The initial merged metadata.
+        file_path (Path): The path to the file (for logging/AI context).
+        use_ai (bool): Flag indicating if AI enhancement is enabled.
+        confidence_threshold (float): Threshold to trigger AI enhancement.
+        min_year (int): Minimum valid year for cleaning.
+        max_year (int): Maximum valid year for cleaning.
 
     Returns:
-        Dict containing cleaned metadata
+        Dict[str, Any]: The cleaned and potentially AI-enhanced metadata.
+
+    Raises:
+        ConfigurationError: If AI is requested but not configured.
+        AICommunicationError: If there's an error communicating with the AI API.
+        AIProcessingError: If there's an error processing the AI response.
     """
-    result = metadata.copy()
+    cleaned_data = clean_metadata(
+        metadata,
+        min_year=min_year,
+        max_year=max_year,
+    )
 
-    # Clean author names
-    author = result["author"]
-    # Handle multiple authors
-    authors = [a.strip() for a in re.split(r",|&|;|and", author) if a.strip()]
+    if use_ai:
+        # Validate API key availability *before* attempting AI enhancement
+        try:
+            validate_perplexity_api_key()
+        except ConfigurationError as e:
+            log.error(f"AI enhancement skipped for {file_path.name}: {e}")
+            # Return cleaned data without AI enhancement if key is missing/invalid
+            # Or re-raise if strict AI usage is required? Re-raising for now.
+            raise
 
-    # Process each author name to ensure consistency
-    processed_authors = []
-    for auth in authors:
-        # Remove extra spaces and standardize capitalization
-        auth = " ".join(auth.split())
-        # Keep existing capitalization as author names are often LastName, FirstName
-        processed_authors.append(auth)
-
-    if len(processed_authors) > 3:
-        result["author"] = f"{processed_authors[0]}_et_al"
-    elif len(processed_authors) > 1:
-        result["author"] = "_".join(processed_authors)
-    elif len(processed_authors) == 1:
-        result["author"] = processed_authors[0]
-    else:
-        result["author"] = UNKNOWN_AUTHOR
-
-    # Clean title: remove extra whitespace and convert to title case
-    title_words = result["title"].split()
-    # Apply title case but preserve acronyms and capitalized words
-    title_words = [
-        w.capitalize() if w.lower() == w or w.upper() == w else w for w in title_words
-    ]
-    result["title"] = "_".join(title_words)
-
-    # Validate year
-    year = result["year"]
-    if not (
-        str(year).isdigit()
-        and len(str(year)) == 4
-        and 1800 <= int(year) <= datetime.now().year
-    ):
-        result["year"] = UNKNOWN_YEAR
-
-    # Make computer-friendly
-    result["author"] = make_computer_friendly(result["author"])
-    result["title"] = make_computer_friendly(result["title"])
-
-    return result
-
-
-def make_computer_friendly(text: str) -> str:
-    """
-    Make text computer-friendly by replacing spaces and special characters with underscores.
-    Preserves original capitalization for readability.
-
-    Args:
-        text: The text to make computer-friendly
-
-    Returns:
-        Computer-friendly text
-    """
-    # Replace illegal characters
-    friendly = re.sub(ILLEGAL_CHARS, "_", text)
-
-    # Replace spaces and other separators with underscores
-    friendly = re.sub(REPLACE_WITH_UNDERSCORE, "_", friendly)
-
-    # Replace multiple underscores with a single underscore
-    friendly = re.sub(r"_+", "_", friendly)
-
-    # Remove trailing/leading underscores
-    friendly = friendly.strip("_")
-
-    return friendly
-
-
-def sanitize_filename(filename: str) -> str:
-    """
-    Sanitize filename to ensure filesystem compatibility while maintaining readability.
-
-    Args:
-        filename: The filename to sanitize
-
-    Returns:
-        Sanitized filename
-    """
-    # Replace only illegal characters, not spaces and parentheses for better readability
-    sanitized = re.sub(ILLEGAL_CHARS, "_", filename)
-
-    # Replace multiple spaces with single space
-    sanitized = re.sub(r"\s+", " ", sanitized)
-
-    # Ensure the filename is not too long (255 chars is a common limit)
-    if len(sanitized) > 240:  # Leave room for extension
-        base, ext = os.path.splitext(sanitized)
-        sanitized = base[:236] + ext  # 236 + 4 (.pdf/.epub) = 240
-
-    return sanitized
-
-
-def generate_new_filename(metadata: Dict[str, str]) -> str:
-    """
-    Generate new filename based on metadata.
-
-    Args:
-        metadata: The cleaned metadata
-
-    Returns:
-        The new filename in the format "Author_Title_Year.ext" with improved readability
-    """
-    extension = metadata.get("extension", "pdf")
-
-    # Convert underscores to spaces for better readability in the final filename
-    author = metadata["author"].replace("_", " ")
-    title = metadata["title"].replace("_", " ")
-    year = metadata["year"]
-
-    # Create filename with better human readability using hyphens and parentheses
-    new_name = f"{author} - {title} ({year}).{extension}"
-
-    return sanitize_filename(new_name)
-
-
-def rename_file(
-    source_path: str, new_filename: str, dry_run: bool = False
-) -> Tuple[bool, str]:
-    """
-    Rename a file with collision detection.
-
-    Args:
-        source_path: Path to the source file
-        new_filename: The new filename (not path)
-        dry_run: If True, don't actually rename
-
-    Returns:
-        Tuple of (success, message)
-    """
-    source = Path(source_path)
-    target_dir = source.parent
-    target_path = target_dir / new_filename
-
-    # Handle filename collision
-    counter = 1
-    original_name_base, ext = os.path.splitext(new_filename)
-    while target_path.exists():
-        new_name = f"{original_name_base}_{counter}{ext}"
-        target_path = target_dir / new_name
-        counter += 1
-
-    if dry_run:
-        return True, f"Would rename '{source.name}' to '{target_path.name}'"
-
-    try:
-        source.rename(target_path)
-        return True, f"Renamed '{source.name}' to '{target_path.name}'"
-    except Exception as e:
-        return False, f"Error renaming '{source.name}': {str(e)}"
-
-
-def process_file(
-    file_path: str,
-    dry_run: bool = False,
-    use_advanced: bool = True,
-    use_ai: bool = False,
-    confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
-) -> Dict[str, str]:
-    """
-    Process a single file.
-
-    Args:
-        file_path: Path to the file
-        dry_run: If True, don't actually rename files
-        use_advanced: If True, use advanced metadata extraction as fallback
-        use_ai: If True, use AI-powered metadata enhancement
-        confidence_threshold: Threshold for using AI enhancement
-
-    Returns:
-        Dict with processing results
-    """
-    result = {
-        "status": "skipped",
-        "message": "",
-        "original_name": os.path.basename(file_path),
-        "new_name": "",
-    }
-
-    # Determine file type
-    is_pdf = file_path.lower().endswith(".pdf")
-    is_epub = file_path.lower().endswith(".epub")
-
-    if not (is_pdf or is_epub):
-        result["message"] = (
-            f"Skipped '{os.path.basename(file_path)}' - not a PDF or EPUB file"
-        )
-        return result
-
-    # Step 1: Extract metadata from filename
-    filename_data = extract_from_filename(file_path)
-
-    # Step 2: Extract metadata from file content
-    content_data = {}
-    if is_pdf:
-        content_data = extract_from_pdf(file_path)
-    elif is_epub:
-        content_data = extract_from_epub(file_path)
-    else:
-        content_data = {
+        # Evaluate quality and decide if AI enhancement is needed
+        # Note: unknown_markers are now centralized in constants.py
+        unknown_markers = {
             "author": UNKNOWN_AUTHOR,
             "title": UNKNOWN_TITLE,
             "year": UNKNOWN_YEAR,
         }
+        try:
+            from intellirename.ai import evaluate_metadata_quality  # Defer import
 
-    # Step 3: Use advanced extraction if needed
-    advanced_data = {
-        "author": UNKNOWN_AUTHOR,
-        "title": UNKNOWN_TITLE,
-        "year": UNKNOWN_YEAR,
-    }
-
-    missing_data = (
-        filename_data["author"] == UNKNOWN_AUTHOR
-        or filename_data["title"] == UNKNOWN_TITLE
-        or filename_data["year"] == UNKNOWN_YEAR
-    )
-
-    if use_advanced and missing_data and is_pdf:  # Advanced extraction only for PDFs
-        log.debug(f"Using advanced metadata extraction for {file_path}")
-        advanced_data = extract_all_metadata(file_path, use_advanced)
-
-    # Step 4: Merge metadata, prioritizing filename data
-    merged_data = merge_metadata(filename_data, content_data, advanced_data)
-
-    # Step 5: Use AI-powered enhancement if enabled and needed
-    unknown_markers = {
-        "author": UNKNOWN_AUTHOR,
-        "title": UNKNOWN_TITLE,
-        "year": UNKNOWN_YEAR,
-    }
-
-    if use_ai and AI_AVAILABLE:
-        # Check if API key is valid before attempting to use it
-        if not validate_perplexity_api_key():
-            log.error(
-                "Cannot use AI enhancement: Invalid or missing Perplexity API key"
+            quality_score, _ = evaluate_metadata_quality(cleaned_data, unknown_markers)
+            log.debug(
+                f"Metadata quality score for {file_path.name}: {quality_score:.2f}"
             )
-            log.error(
-                "Please set a valid API key in your .env file with PERPLEXITY_API_KEY=pplx-..."
-            )
-        else:
-            log.debug(f"Attempting AI-powered metadata enhancement for {file_path}")
-            try:
-                # Call enhance_metadata which includes quality check
-                enhanced_metadata = enhance_metadata(
-                    merged_data,
-                    os.path.basename(file_path),
-                    unknown_markers,
-                    confidence_threshold,
+
+            if quality_score < confidence_threshold:
+                log.info(
+                    f"Low metadata quality ({quality_score:.2f} < {confidence_threshold}) for "
+                    f"'{file_path.name}'. Attempting AI enhancement."
                 )
+                enhanced_data = await enhance_metadata(
+                    cleaned_data,
+                    file_path.name,
+                    unknown_markers=unknown_markers,
+                    confidence_threshold=confidence_threshold,  # Pass threshold for context if needed
+                )
+                # Re-clean after enhancement to ensure consistency
+                cleaned_data = clean_metadata(
+                    enhanced_data, min_year=min_year, max_year=max_year
+                )
+                cleaned_data["ai_enhanced"] = str(
+                    True
+                )  # Mark as enhanced (Store as string)
+            else:
+                log.debug(
+                    f"Metadata quality sufficient ({quality_score:.2f} >= {confidence_threshold}) "
+                    f"for '{file_path.name}'. Skipping AI enhancement."
+                )
+                cleaned_data["ai_enhanced"] = str(False)  # Store as string
 
-                # Only update merged_data if the AI actually improved it
-                if enhanced_metadata != merged_data:
-                    log.info(
-                        f"Metadata enhanced by AI for {os.path.basename(file_path)}"
-                    )
-                    merged_data = enhanced_metadata
-                else:
-                    log.debug("AI enhancement did not change metadata.")
-            except Exception as e:
-                log.warning(f"Error during AI metadata enhancement: {str(e)}")
+        except (AICommunicationError, AIProcessingError) as e:
+            log.error(f"AI enhancement failed for {file_path.name}: {e}")
+            # Decide whether to proceed with cleaned_data or raise. Raising for now.
+            raise
+        except ImportError:
+            log.error(
+                "AI features requested, but 'evaluate_metadata_quality' unavailable."
+            )
+            raise ConfigurationError("AI features seem incorrectly installed.")
+        except Exception as e:
+            log.exception(
+                f"Unexpected error during AI enhancement check for {file_path.name}"
+            )
+            # Raise a more generic error or handle appropriately
+            raise IntelliRenameError(f"Unexpected AI check error: {e}") from e
 
-    # Step 6: Clean and standardize metadata
-    cleaned_data = clean_metadata(merged_data)
+    return cleaned_data
 
-    # Step 7: Generate new filename
-    new_filename = generate_new_filename(cleaned_data)
-    result["new_name"] = new_filename
 
-    # Step 8: If the original name is already in the correct format, skip renaming
-    if os.path.basename(file_path) == new_filename:
-        result["status"] = "skipped"
-        result["message"] = (
-            f"Skipped '{os.path.basename(file_path)}' - already in correct format"
+def _generate_target_path(metadata: Dict[str, Any], file_path: Path) -> Optional[Path]:
+    """Generate the proposed new path for the file based on metadata.
+
+    Args:
+        metadata (Dict[str, Any]): The final metadata for the file.
+        file_path (Path): The original path of the file.
+
+    Returns:
+        Optional[Path]: The proposed new Path object, or None if renaming is not needed.
+    """
+    # Check if metadata is sufficient for renaming
+    if metadata["author"] == UNKNOWN_AUTHOR and metadata["title"] == UNKNOWN_TITLE:
+        log.warning(
+            f"Skipping rename for {file_path.name}: Insufficient metadata "
+            f"(Author and Title are unknown)."
         )
-        return result
+        return None
 
-    # Step 9: Rename the file
-    success, message = rename_file(file_path, new_filename, dry_run)
-    result["message"] = message
+    # Step 6: Generate new filename based on cleaned/enhanced metadata
+    new_filename_base_plus_ext = generate_new_filename(metadata)
+    # generate_new_filename now includes sanitization and extension
+    # We just need the parent dir
+    proposed_new_path = file_path.parent / new_filename_base_plus_ext
 
-    if success:
-        result["status"] = "success" if not dry_run else "would_rename"
+    # Check if rename is actually needed
+    if proposed_new_path == file_path:
+        log.info(f"Skipping rename for {file_path.name}: Filename is already correct.")
+        return None
+
+    return proposed_new_path
+
+
+def _perform_rename_operation(
+    original_path: Path, proposed_new_path: Path, dry_run: bool
+) -> Tuple[str, str]:
+    """Perform the file renaming operation or simulate it (dry run).
+
+    Args:
+        original_path (Path): The original file path.
+        proposed_new_path (Path): The target file path.
+        dry_run (bool): If True, simulate instead of actually renaming.
+
+    Returns:
+        Tuple[str, str]: A tuple containing the status ("renamed" or "dryrun")
+                         and a descriptive message.
+
+    Raises:
+        FileOperationError: If the renaming fails.
+    """
+    if dry_run:
+        message = f"[DRY RUN] Would rename '{original_path.name}' to '{proposed_new_path.name}'"
+        log.info(message)
+        return "dryrun", message
     else:
+        try:
+            rename_file(
+                str(original_path), str(proposed_new_path)
+            )  # Convert Path to str
+            message = f"Renamed '{original_path.name}' to '{proposed_new_path.name}'"
+            log.info(message)
+            return "renamed", message
+        except FileOperationError as e:
+            log.error(f"Failed to rename {original_path.name}: {e}")
+            # Let the exception propagate up to be caught by the main processing loop
+            raise
+
+
+async def process_file(
+    file_path: Path,
+    dry_run: bool = False,
+    use_advanced: bool = True,
+    use_ai: bool = False,
+    confidence_threshold: float = config.DEFAULT_CONFIDENCE_THRESHOLD,
+    min_year: int = config.DEFAULT_MIN_VALID_YEAR,
+    max_year: int = config.DEFAULT_MAX_VALID_YEAR,
+) -> Dict[str, Any]:
+    """Processes a single file asynchronously: extracts, cleans, optionally enhances, renames.
+
+    Args:
+        file_path (Path): The path to the file to process.
+        dry_run (bool): If True, only print proposed changes, don't rename.
+        use_advanced (bool): Whether to use advanced PDF metadata extraction.
+        use_ai (bool): Whether to use AI-powered metadata enhancement.
+        confidence_threshold (float): Confidence threshold for using AI enhancement.
+        min_year (int): Minimum valid publication year from config.
+        max_year (int): Maximum valid publication year from config.
+
+    Returns:
+        Dict[str, Any]: Dictionary with processing results:
+            - "original_path": Path
+            - "new_path": Optional[Path]
+            - "status": str ("skipped", "renamed", "dryrun", "error", "no_change")
+            - "message": str
+            - "metadata": Dict[str, Any] (final metadata used)
+            - "error_details": Optional[str] (exception message if status is "error")
+    """
+    result: Dict[str, Any] = {
+        "original_path": file_path,
+        "new_path": None,
+        "status": "pending",
+        "message": "",
+        "metadata": {},
+        "error_details": None,
+    }
+    pdf_reader: Optional[PyPDF2.PdfReader] = None
+
+    try:
+        # Validate file type
+        if file_path.suffix.lower() not in [".pdf", ".epub"]:
+            result["status"] = "skipped"
+            result["message"] = f"Skipped '{file_path.name}' - not a PDF or EPUB file"
+            return result
+
+        # --- Extraction ---
+        merged_data, pdf_reader = _extract_initial_metadata(file_path, use_advanced)
+        result["metadata"] = merged_data  # Store initial metadata
+
+        # --- Cleaning & Optional AI Enhancement ---
+        final_metadata = await _conditionally_enhance_metadata(
+            merged_data,
+            file_path,
+            use_ai,
+            confidence_threshold,
+            min_year,
+            max_year,
+        )
+        result["metadata"] = final_metadata  # Update with final metadata
+
+        # --- Filename Generation ---
+        proposed_new_path = _generate_target_path(final_metadata, file_path)
+
+        if proposed_new_path is None:
+            # This means renaming wasn't needed (insufficient metadata or already correct)
+            result["status"] = "no_change"
+            # Message might be set by _generate_target_path if insufficient
+            if not result["message"]:
+                result["message"] = (
+                    f"Skipped '{file_path.name}': Filename already correct or insufficient metadata."
+                )
+            return result
+
+        result["new_path"] = proposed_new_path
+
+        # --- Renaming Operation ---
+        status, message = _perform_rename_operation(
+            file_path, proposed_new_path, dry_run
+        )
+        result["status"] = status
+        result["message"] = message
+
+    except IntelliRenameError as e:  # Catch specific app errors
+        log.error(f"Error processing {file_path.name}: {e}")
         result["status"] = "error"
+        result["message"] = f"Failed processing {file_path.name}"
+        result["error_details"] = str(e)
+    except Exception as e:  # Catch unexpected errors
+        log.exception(f"Unexpected error processing {file_path.name}")
+        result["status"] = "error"
+        result["message"] = f"Unexpected failure processing {file_path.name}"
+        result["error_details"] = str(e)
+    finally:
+        # Ensure the PDF file handle is closed if it was opened
+        if pdf_reader and hasattr(pdf_reader.stream, "close"):
+            try:
+                pdf_reader.stream.close()
+            except Exception as close_err:
+                log.warning(
+                    f"Error closing PDF file handle for {file_path.name}: {close_err}"
+                )
 
     return result
 
 
-def main() -> int:
-    """Main function."""
+# --- Helper Functions for main ---
+
+
+def _find_files_to_process(
+    input_paths: List[Union[str, Path]], recursive: bool
+) -> List[Path]:
+    """Find all PDF and EPUB files in the specified paths.
+
+    Args:
+        input_paths (List[Union[str, Path]]): List of directories or files.
+        recursive (bool): Whether to search directories recursively.
+
+    Returns:
+        List[Path]: List of found file Paths.
+    """
+    log.info("Scanning for PDF and EPUB files...")
+    all_files_list: List[Path] = []
+    for input_path_arg in input_paths:
+        input_path = Path(input_path_arg)  # Ensure it's a Path object
+        if input_path.is_dir():
+            # find_files returns a generator, convert to list
+            found_in_dir = list(find_files(input_path, recursive=recursive))
+            log.debug(f"Found {len(found_in_dir)} files in directory: {input_path}")
+            all_files_list.extend(found_in_dir)
+        elif input_path.is_file() and input_path.suffix.lower() in [".pdf", ".epub"]:
+            log.debug(f"Adding single file: {input_path}")
+            all_files_list.append(input_path)
+        else:
+            log.warning(f"Skipping invalid input path: {input_path}")
+
+    # Remove duplicates that might occur if a file is specified directly AND is in a searched dir
+    unique_files = list(set(all_files_list))
+
+    if not unique_files:
+        log.warning("No PDF or EPUB files found in the specified paths.")
+        return []
+    log.info(f"Found {len(unique_files)} unique files to process.")
+    return unique_files
+
+
+async def _run_processing_tasks(
+    files: List[Path],
+    dry_run: bool,
+    use_advanced: bool,
+    use_ai: bool,
+    confidence: float,
+    min_year: int,
+    max_year: int,
+    max_concurrent: int,
+) -> List[Dict[str, Any]]:
+    """Run the file processing tasks concurrently using asyncio.
+
+    Args:
+        files (List[Path]): List of files to process.
+        dry_run (bool): Dry run flag.
+        use_advanced (bool): Use advanced extraction flag.
+        use_ai (bool): Use AI enhancement flag.
+        confidence (float): AI confidence threshold.
+        min_year (int): Min valid year.
+        max_year (int): Max valid year.
+        max_concurrent (int): Maximum number of concurrent tasks.
+
+    Returns:
+        List[Dict[str, Any]]: List of result dictionaries from process_file.
+    """
+    results = []
+    semaphore = asyncio.Semaphore(max_concurrent)  # Limit concurrency
+
+    async def process_with_semaphore(file_path: Path) -> Dict[str, Any]:
+        async with semaphore:
+            # Await the actual processing function
+            return await process_file(
+                file_path,
+                dry_run=dry_run,
+                use_advanced=use_advanced,
+                use_ai=use_ai,
+                confidence_threshold=confidence,
+                min_year=min_year,
+                max_year=max_year,
+            )
+
+    # Setup Rich Progress Bar
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,  # Clear progress bar on exit
+    ) as progress:
+        task_id = progress.add_task("Processing files...", total=len(files))
+        tasks = [process_with_semaphore(f) for f in files]
+
+        # Gather results as they complete, updating progress
+        for future in asyncio.as_completed(tasks):
+            try:
+                result = await future
+                results.append(result)
+            except Exception as e:
+                # This catches errors *raised* by process_file (or semaphore issues)
+                # We should ideally log this, but the result dict format handles errors too
+                log.error(f"Task failed unexpectedly: {e}")
+                # We might need a way to associate this error back to a file if possible
+                # For now, append a generic error result if needed, though process_file handles it
+                results.append(
+                    {
+                        "original_path": None,  # Cannot determine path if task fails externally
+                        "new_path": None,
+                        "status": "error",
+                        "message": "Task execution failed.",
+                        "metadata": {},
+                        "error_details": str(e),
+                    }
+                )
+            finally:
+                progress.update(
+                    task_id, advance=1
+                )  # Update progress regardless of outcome
+
+    return results
+
+
+def _print_processing_summary(results: List[Dict[str, Any]], start_time: float) -> int:
+    """Print a summary of the processing results.
+
+    Args:
+        results (List[Dict[str, Any]]): List of result dictionaries.
+        start_time (float): The start time of the processing.
+
+    Returns:
+        int: Exit code (0 for success, 1 for errors).
+    """
+    end_time = time.time()
+    total_time = end_time - start_time
+
+    renamed_count = sum(1 for r in results if r["status"] == "renamed")
+    dryrun_count = sum(1 for r in results if r["status"] == "dryrun")
+    skipped_count = sum(1 for r in results if r["status"] == "skipped")
+    nochange_count = sum(1 for r in results if r["status"] == "no_change")
+    error_count = sum(1 for r in results if r["status"] == "error")
+    total_processed = len(results)
+
+    # Print summary using Rich Panel
+    summary_lines = [
+        f"Processed: {total_processed}",
+        f"Renamed: {renamed_count}",
+        f"Dry Run (would rename): {dryrun_count}",
+        f"No Change Needed: {nochange_count}",
+        f"Skipped (non-PDF/EPUB): {skipped_count}",
+        f"Errors: {error_count}",
+        f"Total Time: {total_time:.2f} seconds",
+    ]
+    summary_panel = Panel(
+        "\n".join(summary_lines), title="Processing Summary", expand=False
+    )
+    console.print(summary_panel)
+
+    # Print error details if any
+    if error_count > 0:
+        console.print("\n[bold red]Errors Encountered:[/bold red]")
+        for result in results:
+            if result["status"] == "error":
+                path_str = str(result.get("original_path", "Unknown File"))
+                error_msg = result.get("error_details", "No details")
+                console.print(f"- {path_str}: {error_msg}")
+        return 1  # Indicate error with exit code
+    else:
+        return 0  # Indicate success
+
+
+# --- Main Execution ---
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Rename book and paper files (PDF, EPUB) with accurate metadata"
+        description=(
+            "Intelligently rename PDF and EPUB files using extracted metadata and AI."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "directory",
-        nargs="?",
-        default=".",
-        help="Directory containing files (default: current directory)",
+        "target",
+        nargs="+",
+        help="One or more file paths or directories containing files to process.",
+    )
+    parser.add_argument(
+        "-r",
+        "--recursive",
+        action="store_true",
+        help="Recursively search for files in directories.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be renamed without making changes",
+        help="Show what would be renamed without actually changing files.",
     )
     parser.add_argument(
-        "--recursive",
-        "-r",
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Set the logging level.",
+    )
+    parser.add_argument(
+        "--use-ai",
         action="store_true",
-        help="Recursively process subdirectories",
+        help="Use AI (Perplexity API) to enhance metadata if quality is below confidence threshold.",
     )
     parser.add_argument(
-        "--no-advanced",
-        action="store_true",
-        help="Disable advanced metadata extraction (faster but less accurate)",
-    )
-    parser.add_argument(
-        "--enable-ai",
-        action="store_true",
-        help="Enable AI-powered metadata enhancement using AI",
-    )
-    parser.add_argument(
-        "--confidence-threshold",
+        "--confidence",
         type=float,
-        default=DEFAULT_CONFIDENCE_THRESHOLD,
-        help="Confidence threshold for using AI enhancement (0.0-1.0)",
+        default=config.DEFAULT_CONFIDENCE_THRESHOLD,  # Use config value
+        help=f"Confidence threshold (0.0-1.0) to trigger AI enhancement (default: {config.DEFAULT_CONFIDENCE_THRESHOLD}).",
     )
     parser.add_argument(
-        "--verbose", "-v", action="store_true", help="Enable verbose output"
+        "--min-year",
+        type=int,
+        default=config.DEFAULT_MIN_VALID_YEAR,  # Use config value
+        help=f"Minimum valid year for metadata (default: {config.DEFAULT_MIN_VALID_YEAR}).",
     )
     parser.add_argument(
-        "--type",
-        choices=["pdf", "epub", "all"],
-        default="all",
-        help="File types to process (default: all)",
+        "--max-year",
+        type=int,
+        default=config.DEFAULT_MAX_VALID_YEAR,  # Use config value
+        help=f"Maximum valid year for metadata (default: {config.DEFAULT_MAX_VALID_YEAR}).",
     )
+    parser.add_argument(
+        "--max-concurrent",
+        type=int,
+        default=10,  # Default concurrency limit
+        help="Maximum number of files to process concurrently (default: 10).",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose output.",
+    )
+    return parser.parse_args()
 
-    args = parser.parse_args()
 
-    if args.verbose:
-        log.setLevel(logging.DEBUG)
+async def main() -> int:
+    """Main entry point for the IntelliRename CLI."""
+    args = parse_arguments()
+    start_time = time.time()
 
-    # Check for AI capabilities
-    if args.enable_ai and not AI_AVAILABLE:
+    # --- Setup ---
+    setup_logging(level="DEBUG" if args.verbose else "INFO")
+    log.info("Starting IntelliRename...")
+    if args.dry_run:
         log.warning(
-            "AI enhancement requested but required packages are not available. "
-            "Install with: pip install requests python-dotenv"
+            "[bold yellow]Dry run mode enabled. No files will be renamed.[/bold yellow]"
         )
 
-    # Validate directory
-    directory = Path(args.directory)
-    if not directory.exists() or not directory.is_dir():
-        log.error(f"Directory does not exist or is not a directory: {directory}")
+    # Validate AI config if used
+    if args.use_ai:
+        try:
+            validate_perplexity_api_key()
+            log.info("AI enhancement enabled and API key validated.")
+        except ConfigurationError as e:
+            log.error(f"Configuration error: {e}")
+            console.print(f"[bold red]Error:[/bold red] {e}")
+            return 1
+
+    # --- File Discovery ---
+    files_to_process = _find_files_to_process(args.target, args.recursive)
+    if not files_to_process:
+        return 0  # No files found, successful exit
+
+    # --- Processing ---
+    try:
+        results = await _run_processing_tasks(
+            files=files_to_process,
+            dry_run=args.dry_run,
+            use_advanced=args.use_advanced,
+            use_ai=args.use_ai,
+            confidence=args.confidence,
+            min_year=args.min_year,
+            max_year=args.max_year,
+            max_concurrent=args.max_concurrent,
+        )
+    except Exception as e:
+        # Catch errors during task setup/gathering itself (less likely)
+        log.exception("Critical error during task execution")
+        console.print(f"[bold red]Critical Error:[/bold red] {e}")
         return 1
 
-    # Find files
-    file_types = []
-    if args.type == "all" or args.type == "pdf":
-        file_types.append("pdf")
-    if args.type == "all" or args.type == "epub":
-        file_types.append("epub")
+    # --- Summary ---
+    exit_code = _print_processing_summary(results, start_time)
 
-    pattern = (
-        "**/*.{" + ",".join(file_types) + "}"
-        if args.recursive
-        else "*.{" + ",".join(file_types) + "}"
-    )
-    all_files = []
-    for file_type in file_types:
-        glob_pattern = f"**/*.{file_type}" if args.recursive else f"*.{file_type}"
-        all_files.extend(list(directory.glob(glob_pattern)))
-
-    if not all_files:
-        file_types_str = " and ".join(file_types)
-        log.warning(
-            f"No {file_types_str.upper()} files found in {directory}"
-            + (" and its subdirectories" if args.recursive else "")
-        )
-        return 0
-
-    log.info(
-        f"Found {len(all_files)} files in {directory}"
-        + (" and its subdirectories" if args.recursive else "")
-    )
-
-    # Process files with progress bar
-    results: Dict[str, Any] = {
-        "success": 0,
-        "would_rename": 0,
-        "error": 0,
-        "skipped": 0,
-        "ai_enhanced": 0,
-        "files_needing_review": [],
-    }
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task(
-            f"Processing {len(all_files)} files...", total=len(all_files)
-        )
-
-        for file_path in all_files:
-            result = process_file(
-                str(file_path),
-                dry_run=args.dry_run,
-                use_advanced=not args.no_advanced,
-                use_ai=args.enable_ai,
-                confidence_threshold=args.confidence_threshold,
-            )
-
-            results[result["status"]] += 1
-
-            # Track AI-enhanced files
-            if (
-                args.enable_ai
-                and AI_AVAILABLE
-                and (
-                    result["status"] == "success" or result["status"] == "would_rename"
-                )
-            ):
-                results["ai_enhanced"] += 1
-
-            # Log the result
-            if result["status"] == "error":
-                log.error(result["message"])
-                results["files_needing_review"].append(str(file_path))
-            elif result["status"] == "would_rename" and args.dry_run:
-                log.info(result["message"])
-            elif result["status"] == "success":
-                log.debug(result["message"])
-            elif result["status"] == "skipped":
-                log.debug(result["message"])
-
-            # If the new filename contains placeholder data, flag for review
-            if (
-                UNKNOWN_AUTHOR in result["new_name"]
-                or UNKNOWN_YEAR in result["new_name"]
-            ):
-                results["files_needing_review"].append(str(file_path))
-
-            progress.update(task, advance=1)
-
-    # Print summary
-    console.print("\n[bold]Summary:[/bold]")
-    if args.dry_run:
-        console.print(f"Would rename: {results['would_rename']}")
-    else:
-        console.print(f"Successfully renamed: {results['success']}")
-    console.print(f"Skipped: {results['skipped']}")
-    console.print(f"Errors: {results['error']}")
-
-    if args.enable_ai and AI_AVAILABLE:
-        console.print(f"AI-enhanced: {results['ai_enhanced']}")
-
-    console.print(f"Files needing review: {len(results['files_needing_review'])}")
-
-    if results["files_needing_review"]:
-        console.print("\n[bold yellow]Files that may need manual review:[/bold yellow]")
-        for file in results["files_needing_review"][:10]:  # Show first 10
-            console.print(f"  - {file}")
-        if len(results["files_needing_review"]) > 10:
-            console.print(f"  ... and {len(results['files_needing_review']) - 10} more")
-
-    return 0
+    log.info("IntelliRename finished.")
+    return exit_code
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+# This block is now handled by the `intellirename` entry point in pyproject.toml
+# if __name__ == \"__main__\":
+#     # Ensure the main function runs within an asyncio event loop
+#     # exit_code = asyncio.run(main())
+#     # sys.exit(exit_code)
+#     pass # Keep the file importable without running main immediately

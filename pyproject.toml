@@ -7,22 +7,33 @@ name = "intellirename"
 version = "0.1.0"
 description = "An intelligent tool to rename PDF and EPUB files using metadata and AI enhancement"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 dependencies = [
-    "PyPDF2>=3.0.0",
-    "python-dateutil>=2.8.2",
-    "rich>=13.0.0",  # For better console output
-    "requests>=2.28.0",
-    "python-dotenv>=0.20.0",
-    "types-requests>=2"
+    "PyPDF2",
+    "python-dateutil",
+    "rich",  # For better console output
+    "requests",
+    "python-dotenv",
+    "pytest",  # Added pytest for testing
+    "pytest-cov",  # Added pytest-cov for coverage reports
+    "pytest-asyncio",  # Added for async tests
+    "types-requests",
+    "types-pytest",  # Added types for pytest
+    "pathvalidate",
+    "types-pathvalidate",  # Added types for pathvalidate
+    "aiohttp", # Added for async API calls
+    "iniconfig",  # Added for pytest dependency
+    "packaging",  # Added for pytest dependency
+    "pluggy",  # Added for pytest dependency
 ]
 
 [project.optional-dependencies]
 dev = [
-    "mypy>=1.5.0",
-    "types-python-dateutil>=2.8.19.14",
-    "types-requests>=2.28.0",
+    "mypy==1.*",
+    "types-python-dateutil==2.*",
+    "types-requests==2.*",
+    "pytest==8.*",
 ]
 
 [project.scripts]
@@ -52,6 +63,23 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 warn_no_return = true
 warn_unreachable = true
+ignore_missing_imports = true
+
+[tool.mypy-pytest]
+ignore_missing_imports = true
+
+[tool.mypy-pathvalidate]
+ignore_missing_imports = true
+
+[tool.mypy-PyPDF2]
+ignore_missing_imports = true
+
+[tool.mypy-PyPDF2.errors]
+ignore_missing_imports = true
+
+[tool.mypy-tests]
+disable_error_code = ["untyped-decorator"]
+disallow_untyped_decorators = false
 
 [[tool.mypy.overrides]]
 module = "PyPDF2.*"
