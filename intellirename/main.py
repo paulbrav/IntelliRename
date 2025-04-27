@@ -690,9 +690,16 @@ def parse_arguments() -> argparse.Namespace:
         help="Set the logging level.",
     )
     parser.add_argument(
+        "--ai",
         "--use-ai",
+        dest="use_ai",
         action="store_true",
         help="Use AI (Perplexity API) to enhance metadata if quality is below confidence threshold.",
+    )
+    parser.add_argument(
+        "--no-advanced",
+        action="store_true",
+        help="Disable advanced PDF metadata extraction (faster but may miss some metadata).",
     )
     parser.add_argument(
         "--confidence",
@@ -757,10 +764,17 @@ async def main() -> int:
 
     # --- Processing ---
     try:
+        # Handle both use_advanced and no_advanced cases
+        use_advanced = True  # Default value
+        if hasattr(args, "use_advanced"):
+            use_advanced = args.use_advanced
+        elif hasattr(args, "no_advanced"):
+            use_advanced = not args.no_advanced
+
         results = await _run_processing_tasks(
             files=files_to_process,
             dry_run=args.dry_run,
-            use_advanced=args.use_advanced,
+            use_advanced=use_advanced,
             use_ai=args.use_ai,
             confidence=args.confidence,
             min_year=args.min_year,
@@ -780,8 +794,20 @@ async def main() -> int:
     return exit_code
 
 
+def cli_entry_point() -> None:
+    """Synchronous entry point for the CLI script.
+
+    This function is called by the script defined in `pyproject.toml`.
+    It sets up and runs the asyncio event loop for the main async function.
+    """
+    # Note: It's generally better to return the exit code than call sys.exit directly
+    # from library code, but for a top-level script entry point, sys.exit is common.
+    exit_code = asyncio.run(main())
+    sys.exit(exit_code)
+
+
 # This block is now handled by the `intellirename` entry point in pyproject.toml
-# if __name__ == \"__main__\":
+# if __name__ == "__main__":
 #     # Ensure the main function runs within an asyncio event loop
 #     # exit_code = asyncio.run(main())
 #     # sys.exit(exit_code)

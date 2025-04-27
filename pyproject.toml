@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "intellirename"
-version = "0.1.0"
+version = "0.1.1"
 description = "An intelligent tool to rename PDF and EPUB files using metadata and AI enhancement"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -19,9 +19,7 @@ dependencies = [
     "pytest-cov",  # Added pytest-cov for coverage reports
     "pytest-asyncio",  # Added for async tests
     "types-requests",
-    "types-pytest",  # Added types for pytest
     "pathvalidate",
-    "types-pathvalidate",  # Added types for pathvalidate
     "aiohttp", # Added for async API calls
     "iniconfig",  # Added for pytest dependency
     "packaging",  # Added for pytest dependency
@@ -37,7 +35,7 @@ dev = [
 ]
 
 [project.scripts]
-intellirename = "intellirename.main:main"
+intellirename = "intellirename.main:cli_entry_point"
 
 [tool.hatch.build.targets.wheel]
 packages = ["intellirename"]

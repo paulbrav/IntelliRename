@@ -110,23 +110,23 @@ IntelliRename can be configured via command-line arguments, environment variable
 
 Requires Python 3.9+ and `uv` (the Rust-based Python package installer and resolver).
 
-### Recommended Method (using uv tool interface)
+### Standard Installation (as CLI Tool)
 
-```bash
-# Ensure uv is installed (https://github.com/astral-sh/uv)
-# Example using pipx to install uv globally
-# pipx install uv
+Use this method to install `intellirename` as a command-line tool available system-wide (requires `~/.local/bin` or equivalent to be in your PATH).
 
-# Install intellirename globally using uv
-uv tool install intellirename
+# 1. Clone the repository (if you haven't already)
+git clone https://github.com/your-username/intellirename.git
+cd intellirename
 
-# Or install directly from the git repository
-uv tool install git+https://github.com/your-username/intellirename.git
-```
+# 2. Install the tool from the local source
+uv tool install .
+
+# (Optional) Install directly from the git repository (builds locally)
+# uv tool install git+https://github.com/your-username/intellirename.git
 
 ### Development Installation
 
-Clone the repository and install in editable mode with development dependencies:
+Clone the repository and install in *editable mode* within a virtual environment. This is ideal for making changes to the code.
 
 ```bash
 git clone https://github.com/your-username/intellirename.git
@@ -136,7 +136,7 @@ cd intellirename
 uv venv
 # source .venv/bin/activate  # Manual activation if needed
 
-# Install in editable mode (development)
+# Install in editable mode with dev dependencies
 uv pip install -e ".[dev]"
 
 # Run tests (using uv run)
@@ -147,8 +147,22 @@ Note: `uv venv` automatically detects and uses the `.venv` directory. Subsequent
 
 ## Upgrading
 
+If you installed using `uv tool install .` or from git:
+
 ```bash
-uv tool upgrade intellirename
+# Reinstall the tool from the local source to get updates
+uv tool install . --force
+# Or upgrade by name if uv recognizes it (may depend on uv version)
+# uv tool upgrade intellirename
+```
+
+If you installed using `uv pip install -e .` (Development Installation):
+
+```bash
+# Simply pull the latest changes, the editable install reflects them
+git pull
+# If dependencies changed, re-sync the virtual environment
+uv sync
 ```
 
 ## Usage
@@ -162,7 +176,7 @@ intellirename /path/to/your/books
 Advanced options:
 
 ```bash
-intellirename /path/to/your/books --recursive --enable-ai --confidence-threshold 0.6 --verbose
+intellirename /path/to/your/books --recursive --ai --confidence-threshold 0.6 --verbose
 ```
 
 ### Command Line Arguments
@@ -173,7 +187,7 @@ intellirename /path/to/your/books --recursive --enable-ai --confidence-threshold
 | `--recursive`, `-r` | Recursively search for files in directories. |
 | `--dry-run` | Show what would be renamed without actually changing files. |
 | `--log-level` | Set the logging level (DEBUG, INFO, WARNING, ERROR). Default: INFO |
-| `--use-ai` | Enable AI-powered metadata enhancement using Perplexity API. |
+| `--ai` | Enable AI-powered metadata enhancement using Perplexity API. |
 | `--confidence` | Metadata confidence score threshold (0.0-1.0) below which AI enhancement is triggered. |
 | `--no-advanced` | Disable advanced PDF metadata extraction (faster but potentially less accurate). |
 | `--min-year` | Minimum valid publication year for metadata cleaning. |
@@ -184,7 +198,7 @@ intellirename /path/to/your/books --recursive --enable-ai --confidence-threshold
 
 ## AI-Powered Metadata Enhancement
 
-When the `--enable-ai` flag is used, the tool will:
+When the `--ai` flag is used, the tool will:
 
 1. Evaluate the quality of extracted metadata
 2. For files with low-quality or incomplete metadata, query the Perplexity API
@@ -214,7 +228,7 @@ Fix garbled metadata:
 
 Process a directory with all options:
 ```bash
-intellirename ~/Documents/Books --recursive --enable-ai --verbose
+intellirename ~/Documents/Books --recursive --ai --verbose
 ```
 
 ### Enhance Low-Quality Metadata with AI
