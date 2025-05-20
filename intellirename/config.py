@@ -38,9 +38,7 @@ def get_env_var(name: str, default: str, target_type: Type[T]) -> T:
         ) from e
     except Exception as e:
         # Catch any other unexpected error during type conversion
-        log.exception(
-            f"Unexpected error processing env var {name} with value '{value_str}'"
-        )
+        log.exception(f"Unexpected error processing env var {name} with value '{value_str}'")
         raise ConfigurationError(
             f"Unexpected error processing env var {name}: '{value_str}'",
             original_exception=e,
@@ -48,6 +46,7 @@ def get_env_var(name: str, default: str, target_type: Type[T]) -> T:
 
 
 # --- General Settings ---
+# Default confidence threshold for using AI enhancement
 DEFAULT_CONFIDENCE_THRESHOLD: float = get_env_var("CONFIDENCE_THRESHOLD", "0.7", float)
 
 # --- Perplexity AI Settings ---
@@ -91,9 +90,6 @@ USE_CACHE: bool = get_env_var("USE_CACHE", "true", bool)
 # Use helper for Path conversion, providing a default string path
 _default_cache_str = str(Path.home() / ".intellirename" / "cache")
 DEFAULT_CACHE_DIR: Path = get_env_var("CACHE_DIR", _default_cache_str, Path)
-
-# Default confidence threshold for using AI enhancement
-DEFAULT_CONFIDENCE_THRESHOLD = 0.7
 
 # Default valid year range for metadata cleaning
 DEFAULT_MIN_VALID_YEAR = 1500
