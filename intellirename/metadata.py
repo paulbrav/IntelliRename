@@ -31,18 +31,31 @@ log = logging.getLogger("book_renamer.metadata")
 
 # --- Filename Parsing (Moved from main.py) ---
 FILENAME_PATTERNS = [
-    # "[Publisher] Author(s) - Title (Year, Publisher).pdf"
+    # "[Publisher] Author(s) - Title (Year, Publisher).ext"
     re.compile(
-        r"^\[.*?\]\s*(.+?)\s*-\s*(.+?)\s*\((\d{4}).*?\)\.(pdf|epub)$", re.IGNORECASE
+        r"^\[.*?\]\s*(?P<author>.+?)\s*-\s*(?P<title>.+?)\s*\((?P<year>\d{4}).*?\)\.(?P<ext>pdf|epub)$",
+        re.IGNORECASE,
     ),
-    # "Author(s) - Title (Year).pdf"
-    re.compile(r"^(.+?)\s*-\s*(.+?)\s*\((\d{4}).*?\)\.(pdf|epub)$", re.IGNORECASE),
-    # "Title - Author(s) (Year).pdf"
-    re.compile(r"^(.+?)\s*-\s*(.+?)\s*\((\d{4}).*?\)\.(pdf|epub)$", re.IGNORECASE),
-    # "Title (Year).pdf"
-    re.compile(r"^(.+?)\s*\((\d{4}).*?\)\.(pdf|epub)$", re.IGNORECASE),
-    # "Author(s) - Title.pdf"
-    re.compile(r"^(.+?)\s*-\s*(.+?)\.(pdf|epub)$", re.IGNORECASE),
+    # "Author(s) - Title (Year).ext"
+    re.compile(
+        r"^(?P<author>.+?)\s*-\s*(?P<title>.+?)\s*\((?P<year>\d{4}).*?\)\.(?P<ext>pdf|epub)$",
+        re.IGNORECASE,
+    ),
+    # "Title - Author(s) (Year).ext"
+    re.compile(
+        r"^(?P<title>.+?)\s*-\s*(?P<author>.+?)\s*\((?P<year>\d{4}).*?\)\.(?P<ext>pdf|epub)$",
+        re.IGNORECASE,
+    ),
+    # "Title (Year).ext"
+    re.compile(
+        r"^(?P<title>.+?)\s*\((?P<year>\d{4}).*?\)\.(?P<ext>pdf|epub)$",
+        re.IGNORECASE,
+    ),
+    # "Author(s) - Title.ext"
+    re.compile(
+        r"^(?P<author>.+?)\s*-\s*(?P<title>.+?)\.(?P<ext>pdf|epub)$",
+        re.IGNORECASE,
+    ),
 ]
 
 
@@ -58,41 +71,13 @@ def extract_from_filename(filename: str) -> Dict[str, str]:
     for pattern in FILENAME_PATTERNS:
         match = pattern.match(base_filename)
         if match:
-            groups = match.groups()
-            # Pattern: Author - Title (Year).ext or [Pub] Author - Title (Year, Pub).ext
-            if len(groups) >= 3 and groups[2].isdigit() and len(groups[2]) == 4:
-                return {
-                    "author": groups[0].strip(),
-                    "title": groups[1].strip(),
-                    "year": groups[2].strip(),
-                    "extension": groups[-1].lower(),  # Last group is extension
-                }
-            # Pattern: Title - Author (Year).ext
-            elif (
-                len(groups) >= 3 and groups[0].strip() != "" and groups[1].strip() != ""
-            ):  # Avoid matching just (Year).ext
-                return {
-                    "author": groups[1].strip(),  # Author is second group
-                    "title": groups[0].strip(),  # Title is first group
-                    "year": groups[2].strip(),
-                    "extension": groups[-1].lower(),
-                }
-            # Pattern: Title (Year).ext
-            elif len(groups) == 2 and groups[1].isdigit() and len(groups[1]) == 4:
-                return {
-                    "author": UNKNOWN_AUTHOR,
-                    "title": groups[0].strip(),
-                    "year": groups[1],
-                    "extension": groups[-1].lower(),
-                }
-            # Pattern: Author - Title.ext
-            elif len(groups) == 2:
-                return {
-                    "author": groups[0].strip(),
-                    "title": groups[1].strip(),
-                    "year": UNKNOWN_YEAR,
-                    "extension": groups[-1].lower(),
-                }
+            groups = match.groupdict()
+            return {
+                "author": groups.get("author", UNKNOWN_AUTHOR).strip(),
+                "title": groups.get("title", file_path.stem).strip(),
+                "year": groups.get("year", UNKNOWN_YEAR).strip(),
+                "extension": groups.get("ext", extension).lower(),
+            }
 
     # Fallback: Use filename as title
     return {
