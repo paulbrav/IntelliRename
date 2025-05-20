@@ -1,5 +1,5 @@
 """
-Book & Paper Renamer
+IntelliRename
 
 A Python tool to intelligently rename PDF and EPUB book and academic paper files with accurate metadata.
 """
