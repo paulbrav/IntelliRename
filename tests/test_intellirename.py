@@ -1,4 +1,4 @@
-"""Test cases for the PDF Renamer tool."""
+"""Test cases for the IntelliRename tool."""
 
 import os
 import tempfile
