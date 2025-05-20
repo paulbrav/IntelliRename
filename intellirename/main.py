@@ -65,21 +65,6 @@ from .utils import (
     rename_file,
 )
 
-# Filename parsing patterns
-FILENAME_PATTERNS = [
-    # "[Publisher] Author(s) - Title (Year, Publisher).pdf"
-    re.compile(
-        r"^\[.*?\]\s*(.+?)\s*-\s*(.+?)\s*\((\d{4}).*?\)\.(pdf|epub)$", re.IGNORECASE
-    ),
-    # "Author(s) - Title (Year).pdf"
-    re.compile(r"^(.+?)\s*-\s*(.+?)\s*\((\d{4}).*?\)\.(pdf|epub)$", re.IGNORECASE),
-    # "Title - Author(s) (Year).pdf"
-    re.compile(r"^(.+?)\s*-\s*(.+?)\s*\((\d{4}).*?\)\.(pdf|epub)$", re.IGNORECASE),
-    # "Title (Year).pdf"
-    re.compile(r"^(.+?)\s*\((\d{4}).*?\)\.(pdf|epub)$", re.IGNORECASE),
-    # "Author(s) - Title.pdf"
-    re.compile(r"^(.+?)\s*-\s*(.+?)\.(pdf|epub)$", re.IGNORECASE),
-]
 
 # Configure logging with rich
 logging.basicConfig(
